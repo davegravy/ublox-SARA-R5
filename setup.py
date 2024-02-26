@@ -14,7 +14,7 @@ REQUIRES_PYTHON = '~=3.6'
 
 # What packages are required for this module to be executed?
 REQUIRED = [
-    'pyserial',
+    'pyserial','validators'
 ]
 
 # What packages are optional?

@@ -1,8 +1,8 @@
 ======
-U-blox
+U-blox R5
 ======
 
-Python library for U-blox cellular modules.
+Python library for U-blox SARA-R5 modules.
 
 Installation
 ============
@@ -11,7 +11,7 @@ Python version supported: 3.6+
 
 .. code-block::
 
-    pip install ublox
+    pip install ubloxR5
 
 
 About
@@ -25,38 +25,25 @@ device to send data over, for example, NB-IoT.
 Supported Modules
 =================
 
-* SARA-N211
-* SARA-R410
-* SARA-R412
+* SARA-R500S
+* SARA-R510S
 
 Example Use:
 ============
 
 .. code-block::
 
-    module = SaraR4Module(serial_port='/dev/tty.usbmodem14111')
+    module = SaraR5Module(serial_port='/dev/tty.usbmodem14111')
     module.setup()
     module.connect(operator=24001)
-    sock = module.create_socket()
-    sock.sendto(b'Message To Echo Server', ('195.34.89.241', 7))
-    sock.close()
+    module.update_radio_statistics()
+    print(module.radio_statistics["RSRQ"])
 
 Documentation
 =============
-Full documentation can be found at https://ublox.readthedocs.io/
+Full documentation can be found at TBD
 
-Development
-===========
 
-The library is currently used for testing infrastructure in Sweden. If you find
-problems in your country please open an issue so we can make the library as
-general as possible.
-
-If you have special need there is always the possibility to used the lower
-level API for AT Commands via ._at_action()
-
-If you have use-cases that could be solved with more options on functions, make
-the change yourself and open a pull request or open an issue.
 
 
 

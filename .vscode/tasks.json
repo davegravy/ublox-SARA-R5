@@ -1,0 +1,17 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "deploy",
+            "type": "shell",
+            "command": "eval \"$(ssh-agent -s)\" && ssh-add ~/.ssh/me3 && rsync -avz -e 'ssh -p 1022' ./ root@cellmodem.davegrant.ca:/root/ublox-SARA-R5 && ssh root@cellmodem.davegrant.ca -p 1022 'python3 /root/ublox-SARA-R5/ublox/test.py'",
+            "problemMatcher": [],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            }
+        }
+    ]
+}
+
+
