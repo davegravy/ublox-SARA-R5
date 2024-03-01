@@ -2,13 +2,17 @@ import time
 import serial
 import binascii
 import validators
+import mpio
 
 from enum import Enum
 import logging
 
 from ublox.http import HTTPClient, SecurityProfile
+from ublox.utils import PSMActiveTime, PSMPeriodicTau
 #from ublox.socket import UDPSocket
 from collections import namedtuple
+
+from typing import Callable
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +26,11 @@ class CMEError(Exception):
 class ATError(Exception):
     """AT Command Error"""
 
+class ATAckError(ATError):
+    """Didn't receive an expected ACK"""
+
+class ATAckMissingError(ATError):
+    """Didn't receive any ACK"""
 
 class ATTimeoutError(ATError):
     """Making an AT Action took to long"""
@@ -98,17 +107,133 @@ class SaraR5Module:
         ENABLED_WITH_LOCATION_AND_PSM = 4
         ENABLED_WITH_LOCATION_AND_EMM_CAUSE_AND_PSM = 5
 
+    class MobileNetworkOperator(Enum):
+        UNDEFINED_REGULATORY = 0
+        SIM_ICCID_IMSI_SELECT = 1
+        AT_AND_T = 2
+        VERIZON = 3
+        TELSTRA = 4
+        T_MOBILE_US = 5
+        CHINA_TELECOM = 6
+        SPRINT = 8
+        VODAFONE = 19
+        NTT_DOCOMO = 20
+        TELUS = 21
+        SOFTBANK = 28
+        DEUTSCHE_TELEKOM = 31
+        US_CELLULAR = 32
+        VIVO = 33
+        LG_U_PLUS = 38
+        SKT = 39
+        KDDI = 41
+        ROGERS = 43
+        CLARO_BRASIL = 44
+        TIM_BRASIL = 45
+        ORANGE_FRANCE = 46
+        BELL = 47
+        GLOBAL = 90
+        STANDARD_EUROPE = 100
+        STANDARD_EUROPE_NO_EPCO = 101
+        STANDARD_JP_GLOBAL = 102
+        AT_AND_T_2_4_12 = 198
+        GENERIC_VOICE_CAPABLE_AT_AND_T = 199
+        GCF_PTCRB = 201
+        FIRSTNET = 206
+
+    class PSDProtocolType(Enum):
+        IPV4 = 0
+        IPV6 = 1
+        IPV4V6_WITH_IPV4_PREFERRED = 2
+        IPV4V6_WITH_IPV6_PREFERRED = 3
+    
+    class PSDAction(Enum):
+        RESET = 0
+        STORE = 1
+        LOAD = 2
+        ACTIVATE = 3
+        DEACTIVATE = 4
+
+    class PSDParameters(Enum):
+        IP_ADDRESS = 0
+        DNS1 = 1
+        DNS2 = 2
+        QOS_PRECEDENCE = 3
+        QOS_DELAY = 4
+        QOS_RELIABILITY = 5
+        QOS_PEAK_RATE = 6
+        QOS_MEAN_RATE = 7
+        ACTIVATION_STATUS = 8
+        QOS_DELIVERY_ORDER = 9
+        QOS_ERRONEOUS_SDU_DELIVERY = 10
+        QOS_EXTENDED_GUARANTEED_DOWNLINK_BIT_RATE = 11
+        QOS_EXTENDED_MAXIMUM_DOWNLINK_BIT_RATE = 12
+        QOS_GUARANTEED_DOWNLINK_BIT_RATE = 13
+        QOS_GUARANTEED_UPLINK_BIT_RATE = 14
+        QOS_MAXIMUM_DOWNLINK_BIT_RATE = 15
+        QOS_MAXIMUM_UPLINK_BIT_RATE = 16
+        QOS_MAXIMUM_SDU_SIZE = 17
+        QOS_RESIDUAL_BIT_ERROR_RATE = 18
+        QOS_SDU_ERROR_RATIO = 19
+        QOS_SIGNALING_INDICATOR = 20
+        QOS_SOURCE_STATISTICS_DESCRIPTOR = 21
+        QOS_TRAFFIC_CLASS = 22
+        QOS_TRAFFIC_PRIORITY = 23
+        QOS_TRANSFER_DELAY = 24
+
     class PDPType(Enum):
         IPV4 = 'IP'
         NONIP = 'NONIP'
         IPV4V6 = 'IPV4V6'
         IPV6 = 'IPV6'
 
+    class PowerSavingUARTMode(Enum):
+        DISABLED = 0
+        ENABLED = 1
+        RTS_CONTROLLED = 2
+        DTS_CONTROLLED = 3
+        ENABLED_2 = 4 # same as ENABLED?
+    
+    class eDRXMode(Enum):
+        DISABLED = 0
+        ENABLED = 1
+        ENABLED_WITH_URC = 2
+        DISABLED_AND_RESET = 3
+    
+    class eDRXAccessTechnology(Enum):
+        EUTRAN_WB_S1 = 4
+        EUTRAN_NB_S1 = 5
+
+    class eDRXCycle(Enum):
+        T_5_12 = '0000'
+        T_10_24 = '0001'
+        T_20_48 = '0010'
+        T_40_96 = '0011'
+        T_81_92 = '0100'
+        T_163_84 = '0101'
+        T_327_68 = '0110'
+        T_655_36 = '0111'
+        T_1310_72 = '1000'
+        T_2621_44 = '1001'
+        T_5242_88 = '1010'
+        T_10485_76 = '1011'
+        T_20971_52 = '1100'
+        T_41943_04 = '1101'
+        T_83886_08 = '1110'
+        T_167772_16 = '1111'
+
+    class PSMMode(Enum):
+        DISABLED = 0
+        ENABLED = 1
+        DISABLED_AND_RESET = 2
+
+
     SUPPORTED_SOCKET_TYPES = ['UDP', 'TCP']
     
-    def __init__(self, serial_port: str, baudrate=115200, rtscts=False, roaming=False, echo=True):
+    def __init__(self, serial_port: str, baudrate=115200, rtscts=False, roaming=False, echo=True, power_toggle: Callable[[], None] = None):
         self._serial_port = serial_port
         self._serial = serial.Serial(self._serial_port, baudrate=baudrate, rtscts=rtscts,bytesize=8,parity='N',stopbits=1,timeout=5)
+        self.power_toggle = power_toggle if power_toggle else lambda: (_ for _ in ()).throw(NotImplementedError("Power toggle function needs to be configured"))
+        self.psd = {}
         self.echo = echo
         self.roaming = roaming
         self.ip = None
@@ -120,27 +245,72 @@ class SaraR5Module:
         self.imei = None
         # TODO: make a class containing all states
         self.registration_status = 0
-        self.radio_signal_power = None
-        self.radio_total_power = None
-        self.radio_tx_power = None
-        self.radio_tx_time = None
-        self.radio_rx_time = None
-        self.radio_cell_id = None
-        self.radio_ecl = None
-        self.radio_snr = None
-        self.radio_earfcn = None
-        self.radio_pci = None
-        self.radio_rsrq = None
-        self.radio_rsrp = None
         self.current_rat = None
 
-    def setup(self, radio_mode='LTE-M'):
+    def serial_init(self, retry_threshold=5):
+        #TODO: update this for when we have VIN available
+        responding = None
+        echo_configured = None
+        ATAckErrors = 0
+        ATTimeoutErrors = 0
+
+        self._serial.reset_input_buffer()
+
+        while True:
+            try:
+                self._at_action("AT", timeout=0.25)
+                break
+            except ATAckError as e:
+                logger.debug(e)
+                ATAckErrors += 1
+                responding = True
+                echo_configured = False
+            except ATAckMissingError as e:
+                logger.debug(e)
+                ATTimeoutErrors += 1
+                responding = False
+            
+            if not responding:
+                logger.info("toggling power")
+                self.power_toggle()
+                time.sleep(2) # wait for boot
+            if responding and not echo_configured:
+                try:
+                    self._at_action("ATE0", timeout=0.25)
+                except ATAckError:
+                    pass
+                self._serial.reset_input_buffer()
+                echo_configured = True
+            if ATAckErrors + ATTimeoutErrors > retry_threshold:
+                raise Exception("Module not responding")
+            logger.info(f'retrying init attempt #{ATAckErrors + ATTimeoutErrors}')
+
+        
+    def setup(self, mno_profile, apn):
+
+        #TODO: support manually connecting to specific operator
+        #TODO: support NB-IoT
+        cid_profile_id, psd_profile_id = 1, 0 #TODO: support multiple profiles
+        imei = self.AT_read_imei()
+        self.info = {"imei":imei}
+        self.AT_set_error_format(2) # verbose format
+        self.AT_set_module_functionality(SaraR5Module.ModuleFunctionality.MINIMUM_FUNCTIONALITY)
+        self.AT_set_MNO_profile(mno_profile)
+        self.AT_set_pdp_context(cid_profile_id, SaraR5Module.PDPType.IPV4, apn)
+        self.AT_set_module_functionality(SaraR5Module.ModuleFunctionality.FULL_FUNCTIONALITY)
+        self._await_connection(roaming=False, timeout=60)
+        self.AT_set_PSD_protocol_type(psd_profile_id, SaraR5Module.PSDProtocolType.IPV4)
+        self.AT_set_PSD_to_CID_mapping(psd_profile_id, cid_profile_id)
+        self.AT_get_PSD_profile_status(psd_profile_id, SaraR5Module.PSDParameters.ACTIVATION_STATUS)
+        if not self.psd["is_active"]:
+            self.AT_PSD_action(psd_profile_id, SaraR5Module.PSDAction.ACTIVATE)
+
+    def setup_old(self, radio_mode='LTE-M'):
         """
         Running all commands to get the module up an working
         """
-        #TODO: check GPIO and power on if needed
 
-        self.read_imei()
+
         #TODO: figure out why NBIOT won't work
         #self.set_radio_mode(mode=radio_mode)
         self.enable_radio_functions()
@@ -180,8 +350,14 @@ class SaraR5Module:
         self.imei = int(result[0])
 
     def AT_set_error_format(self, format: ErrorFormat=ErrorFormat.DISABLED):
-        self._at_action('AT+CMEE={format}')  # enable verbose errors
+        self._at_action(f'AT+CMEE={format}')  # enable verbose errors
         logger.info('Verbose errors enabled')
+
+    def AT_set_MNO_profile(self, profile_id:MobileNetworkOperator):
+        self._at_action(f'AT+UMNOPROF={profile_id.value}')
+        logger.info(f'Mobile Network Operator Profile set to {profile_id.name}')
+
+
 
     def set_band_mask(self, bands: list = None):
         """
@@ -207,14 +383,9 @@ class SaraR5Module:
     #     logger.info('Enables reporting of RSRP and RSRQ via AT+UCGED')
     #     self._at_action('AT+UCGED=5')
 
-    def AT_set_psm_mode(self):
-        raise NotImplementedError
-    #     #TODO: AT+NPSMR doesn't exist?    
-    #     """
-    #     Enable Power Save Mode
-    #     """
-    #     self._at_action(self.AT_ENABLE_POWER_SAVING_MODE)
-    #     logger.info('Enabled Power Save Mode')
+    def AT_set_psm_mode(self, mode:PSMMode, periodic_tau:PSMPeriodicTau, active_time:PSMActiveTime):
+        self._at_action(f'AT+CPSMS={mode.value},,,{periodic_tau.value},{active_time.value}')
+        logger.info(f'PSM Mode set to {mode.name} with Periodic Tau {periodic_tau.name} and Active Time {active_time.name}')
 
     def AT_config_signaling_connection_urc(self,config:SignallingConnectionStatusReportConfig=SignallingConnectionStatusReportConfig.DISABLED):
         """
@@ -230,13 +401,18 @@ class SaraR5Module:
         self._at_action(f'AT+CEREG={config.value}')
         logger.info(f'{config.name} set to {config.value}')
 
-    def AT_set_module_functionality(self,function:ModuleFunctionality=ModuleFunctionality.FULL_FUNCTIONALITY,reset:bool=False):
+    def AT_set_module_functionality(self,function:ModuleFunctionality=ModuleFunctionality.FULL_FUNCTIONALITY,reset:bool=None):
 
         if reset and function not in [SaraR5Module.ModuleFunctionality.FULL_FUNCTIONALITY,SaraR5Module.ModuleFunctionality.AIRPLANE_MODE]:
             raise ValueError('Reset can only be used with FULL_FUNCTIONALITY or AIRPLANE_MODE')
         
-        self._at_action(f'AT+CFUN={function},{int(reset)}')
-        logger.info(f'Module Functionality set to {function.name} with reset {reset}')
+        at_command = f'AT+CFUN={function.value}'
+        logger_str = f'Module Functionality set to {function.name}'
+        if reset is not None:
+            at_command+=f',{int(reset)}'
+            logger_str+=f' with reset {reset}'
+        self._at_action(at_command)
+        logger.info(logger_str)
 
     def AT_read_module_functionality(self):
         raise NotImplementedError
@@ -264,7 +440,7 @@ class SaraR5Module:
         if pdp_type==SaraR5Module.PDPType.IPV6 and not validators.ipv6(pdp_address):
             raise ValueError("Invalid IPV6 address")
     
-        self._at_action(f'AT+CGDCONT={cid},"{pdp_type}","{apn}","{pdp_address}",{int(data_compression)},{int(header_compression)}')
+        self._at_action(f'AT+CGDCONT={cid},"{pdp_type.value}","{apn}","{pdp_address}",{int(data_compression)},{int(header_compression)}')
         logger.info(f'PDP Context set to {pdp_type.name} with APN {apn} and PDP Address {pdp_address}')
 
     def create_socket(self, socket_type='UDP', port: int = None):
@@ -307,7 +483,72 @@ class SaraR5Module:
         logger.info('Updating radio statistics')
         
         return result[1:]
+    
+    def AT_set_PSD_protocol_type(self, profile_id:int=0,protocol_type:PSDProtocolType=PSDProtocolType.IPV4):
+        if profile_id not in range (0, 7):
+            raise ValueError('Profile ID must be between 0 and 6')
+        self._at_action(f'AT+UPSD={profile_id},0,{protocol_type.value}')
+        logger.info(f'PSD Protocol Type set to {protocol_type.name}')
+
+    def AT_set_PSD_to_CID_mapping(self, profile_id:int=0, cid:int=1):
+        if profile_id not in range (0, 7):
+            raise ValueError('Profile ID must be between 0 and 6')
+        if cid not in range (0, 9):
+            raise ValueError('CID must be between 0 and 8')
+        self._at_action(f'AT+UPSD={profile_id},100,{cid}')
+        logger.info(f'PSD Profile {profile_id} mapped to CID {cid}')
+
+    def AT_PSD_action(self, profile_id:int=0, action:PSDAction=PSDAction.RESET):
+        if profile_id not in range (0, 7):
+            raise ValueError('Profile ID must be between 0 and 6')
+        self._at_action(f'AT+UPSDA={profile_id},{action.value}')
+        logger.info(f'PSD Profile {profile_id} took action {action.name}')
+    
+    def AT_set_power_saving_uart_mode(self, mode:PowerSavingUARTMode=PowerSavingUARTMode.DISABLED, idle_optimization:bool=None, timeout:int=None):
+        if idle_optimization is not None and mode == SaraR5Module.PowerSavingUARTMode.DISABLED:
+            raise ValueError('Idle optimization can only be used with PowerSavingUARTMode other than DISABLED')
+        if timeout is not None and mode != SaraR5Module.PowerSavingUARTMode.ENABLED and mode != SaraR5Module.PowerSavingUARTMode.ENABLED_2:
+            raise ValueError('Timeout can only be used with PowerSavingUARTMode ENABLED or ENABLED_2')
+        if timeout not in range (40, 65001):
+            raise ValueError('Timeout must be between 40 and 65000')
+    
+    def AT_get_PSD_profile_status(self, profile_id:int=0, parameter:PSDParameters=PSDParameters.IP_ADDRESS):
+        if profile_id not in range (0, 7):
+            raise ValueError('Profile ID must be between 0 and 6')
+        response_list = self._at_action(f'AT+UPSND={profile_id},{parameter.value}',capture_urc=True)
+
+        response = int(response_list[0].decode().split(':')[1].split(',')[2])
+
+        if parameter == SaraR5Module.PSDParameters.IP_ADDRESS:
+            self.psd["ip"] = response
+            logger.info(f'PSD Profile {profile_id} IP Address is {response}')
+
+        if parameter == SaraR5Module.PSDParameters.ACTIVATION_STATUS:
+            self.psd["is_active"] = bool(response)
+            logger.info(f'PSD Profile {profile_id} Activation Status is {self.psd["is_active"]}')
+
+        #TODO: support other parameters, e.g. QoS.
+
+    def AT_store_current_configuration(self, profile_id:int=0):
+        if profile_id not in range (0, 2):
+            raise ValueError('Profile ID must be between 0 and 1')
+
+        self._at_action(f'AT&W{profile_id}')
+
+        logger.info(f'Stored current configuration to profile {profile_id}')
+
+    def AT_configure_eDRX(self, mode:eDRXMode, access_technology:eDRXAccessTechnology, requested_eDRX_cycle:eDRXCycle, requested_PTW:eDRXCycle):
+        self._at_action(f'AT+CEDRXS={mode.value},{access_technology.value},{requested_eDRX_cycle.value},{requested_PTW.value}')
         
+        logger.info(f'eDRX configured with mode {mode.name}, access technology {access_technology.name}, requested eDRX cycle {requested_eDRX_cycle.name} and requested PTW {requested_PTW.name}')
+
+    def AT_set_power_saving_mode_indication(self, enabled:bool):
+        self._at_action(f'AT+UPSMR={int(enabled)}')
+        logger.info(f'Power Saving Mode Indication set to {enabled}')
+
+    def AT_set_signalling_connection_status_indication(self, enabled:bool):
+        raise NotImplementedError
+
     def _create_upd_socket(self, port):
         raise NotImplementedError
         # at_command = f'{AT+USOCR=17}'
@@ -510,8 +751,10 @@ class SaraR5Module:
             ack = ack[len(wanted_echo):]
 
         wanted_ack = [b'\n',b'\r\n'] if binary_cmd else [b'\r\n']
+        if ack == b'':
+            raise ATAckMissingError(f'Ack was not received')
         if ack not in wanted_ack:
-            raise ValueError(f'Ack was not received properly, received {ack}, expected {wanted_ack}')
+            raise ATAckError(f'Ack was not received properly, received {ack}, expected {wanted_ack}')
         
     @staticmethod
     def _remove_line_ending(line: bytes):
@@ -583,6 +826,22 @@ class SaraR5Module:
         logger.debug(f'Received: {clean_list}')
 
         return irc_list
+    
+    def toggle_power(self):
+        """
+        Toggles the power of the module
+        """
+        #TODO: read current power state from VIN
+        self.power_toggle() 
+        #TODO: _await_vin() to check if power has been toggled
+        #TODO: if power is on, wait for AT command reply
+        #loop until AT returns OK
+        while True:
+            try: 
+                self._at_action('AT',timeout=1)
+                break 
+            except ATTimeoutError:
+                continue 
     
     @staticmethod
     def _parse_udp_response(message: bytes):

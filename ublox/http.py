@@ -55,7 +55,7 @@ class SecurityProfile:
         #     self._at_action(f'AT+USECMNG=0,{type.value},"{type.name}_{profile_id}",{length}', binary_input=True)
         #     self._write(data)
         #self._at_action(f'AT+USECMNG=1,{type.value},"{internal_name}","{filename_out}"',capture_urc=True)
-        self.AT_import_cert_from_file(type, internal_name, filename_out)
+        SecurityProfile.AT_import_cert_from_file(self._module, type, internal_name, filename_out)
         logger.info(f'Uploaded file {filepath} to {type.value} "{internal_name}"')
         return internal_name
     
@@ -69,15 +69,15 @@ class SecurityProfile:
             self.AT_set_server_name_indication(hostname)
 
         if ca_cert:
-            if SecurityProfile.AT_get_cert_md5(self._module, SecurityProfile.CertificateType.CA_CERT, ca_cert) is None:
+            if SecurityProfile.AT_get_cert_md5(self._module,SecurityProfile.CertificateType.CA_CERT, ca_cert) is None:
                 raise ValueError(f'Invalid CA Cert: {ca_cert}, did you upload it?')
             self.AT_set_ca_cert(ca_cert)
         if client_cert:
-            if SecurityProfile.AT_get_cert_md5(self._module, SecurityProfile.CertificateType.CLIENT_CERT, client_cert) is None:
+            if SecurityProfile.AT_get_cert_md5(self._module,SecurityProfile.CertificateType.CLIENT_CERT, client_cert) is None:
                 raise ValueError(f'Invalid Client Cert: {client_cert}, did you upload it?')
             self.AT_set_client_cert(client_cert)
         if client_key:
-            if SecurityProfile.AT_get_cert_md5(self._module, SecurityProfile.CertificateType.CLIENT_PRIVATE_KEY, client_key) is None:
+            if SecurityProfile.AT_get_cert_md5(self._module,SecurityProfile.CertificateType.CLIENT_PRIVATE_KEY, client_key) is None:
                 raise ValueError(f'Invalid Client Key: {client_key}, did you upload it?')
             self.AT_set_client_key(client_key)
 
@@ -138,21 +138,23 @@ class SecurityProfile:
         logger.info(f'Set client key to "{internal_name}" for security profile {self.profile_id}')
     
     def AT_get_cert_md5(module:'SaraR5Module', type:CertificateType, internal_name):
+        from ublox import modules
         SecurityProfile.validate_cert_name(internal_name)
         
         # errors if not found or invalid
         try:
             result = module._at_action(f'AT+USECMNG=4,{type.value},"{internal_name}"',capture_urc=True)
-        except ATError:
+        except modules.ATError:
             return None
         
         return result[0].decode().split(',')[3].strip('"')
     
     def AT_import_cert_from_file(module:'SaraR5Module', type:CertificateType, internal_name:str, filename:str):
+        from ublox.modules import SaraR5Module
         SecurityProfile.validate_cert_name(internal_name)
         SaraR5Module.validate_filename(filename)
         
-        module._at_action(f'AT+USECMNG=1,{type.value},"{internal_name},{filename}"',capture_urc=True)
+        module._at_action(f'AT+USECMNG=1,{type.value},"{internal_name}","{filename}"',capture_urc=True)
         logger.info(f'Imported {type.name} from file "{filename}" to internal name {internal_name}')
 
     def validate_cert_name(internal_name:str):
