@@ -3,6 +3,10 @@ import serial
 import binascii
 import validators
 import mpio
+import threading
+import queue
+import datetime
+import time
 
 from enum import Enum
 import logging
@@ -106,6 +110,15 @@ class SaraR5Module:
         ENABLED_WITH_LOCATION_AND_EMM_CAUSE = 3
         ENABLED_WITH_LOCATION_AND_PSM = 4
         ENABLED_WITH_LOCATION_AND_EMM_CAUSE_AND_PSM = 5
+
+    class EPSNetworkRegistrationStatus(Enum):
+        NOT_REGISTERED = 0
+        REGISTERED_HOME_NET = 1
+        NOT_REGGISTERED_AND_SEARCHING = 2
+        REGISTRATION_DENIED = 3
+        UNKNOWN = 4
+        REGISTERED_AND_ROAMING = 5
+        EMERGENCY_BEARER_ONLY = 8
 
     class MobileNetworkOperator(Enum):
         UNDEFINED_REGULATORY = 0
@@ -232,6 +245,11 @@ class SaraR5Module:
     def __init__(self, serial_port: str, baudrate=115200, rtscts=False, roaming=False, echo=True, power_toggle: Callable[[], None] = None):
         self._serial_port = serial_port
         self._serial = serial.Serial(self._serial_port, baudrate=baudrate, rtscts=rtscts,bytesize=8,parity='N',stopbits=1,timeout=5)
+        self.terminate = False
+        self.queue = queue.Queue()
+        self.lock = threading.Lock()
+        self.read_thread = threading.Thread(target=self._read_from_device)
+        self.read_thread.daemon = True
         self.power_toggle = power_toggle if power_toggle else lambda: (_ for _ in ()).throw(NotImplementedError("Power toggle function needs to be configured"))
         self.psd = {}
         self.echo = echo
@@ -247,10 +265,19 @@ class SaraR5Module:
         self.registration_status = 0
         self.current_rat = None
 
+        self.urc_mappings = {
+            "+CEREG":  self.handle_cereg,
+            "+UUPSDD": self.handle_uupsdd
+            
+        }
+
+        self.read_thread.start()
+
     def serial_init(self, retry_threshold=5):
+        logger.info('Initializing module')
         #TODO: update this for when we have VIN available
         responding = None
-        echo_configured = None
+        #echo_configured = None
         ATAckErrors = 0
         ATTimeoutErrors = 0
 
@@ -258,14 +285,14 @@ class SaraR5Module:
 
         while True:
             try:
-                self._at_action("AT", timeout=0.25)
+                self._send_command("AT", expected_reply=False, timeout=0.25)
                 break
-            except ATAckError as e:
-                logger.debug(e)
-                ATAckErrors += 1
-                responding = True
-                echo_configured = False
-            except ATAckMissingError as e:
+            # except ATAckError as e:
+            #     logger.debug(e)
+            #     ATAckErrors += 1
+            #     responding = True
+            #     echo_configured = False
+            except ATTimeoutError as e:
                 logger.debug(e)
                 ATTimeoutErrors += 1
                 responding = False
@@ -274,13 +301,13 @@ class SaraR5Module:
                 logger.info("toggling power")
                 self.power_toggle()
                 time.sleep(2) # wait for boot
-            if responding and not echo_configured:
-                try:
-                    self._at_action("ATE0", timeout=0.25)
-                except ATAckError:
-                    pass
-                self._serial.reset_input_buffer()
-                echo_configured = True
+            # if responding and not echo_configured:
+            #     try:
+            #         self._at_action("ATE0", timeout=0.25)
+            #     except ATAckError:
+            #         pass
+            #     self._serial.reset_input_buffer()
+            #     echo_configured = True
             if ATAckErrors + ATTimeoutErrors > retry_threshold:
                 raise Exception("Module not responding")
             logger.info(f'retrying init attempt #{ATAckErrors + ATTimeoutErrors}')
@@ -291,19 +318,28 @@ class SaraR5Module:
         #TODO: support manually connecting to specific operator
         #TODO: support NB-IoT
         cid_profile_id, psd_profile_id = 1, 0 #TODO: support multiple profiles
-        imei = self.AT_read_imei()
-        self.info = {"imei":imei}
-        self.AT_set_error_format(2) # verbose format
+        self.AT_set_echo(False)
+
+        self.AT_set_error_format(SaraR5Module.ErrorFormat.VERBOSE) # verbose format
+        self.AT_read_imei()
         self.AT_set_module_functionality(SaraR5Module.ModuleFunctionality.MINIMUM_FUNCTIONALITY)
         self.AT_set_MNO_profile(mno_profile)
         self.AT_set_pdp_context(cid_profile_id, SaraR5Module.PDPType.IPV4, apn)
         self.AT_set_module_functionality(SaraR5Module.ModuleFunctionality.FULL_FUNCTIONALITY)
-        self._await_connection(roaming=False, timeout=60)
-        self.AT_set_PSD_protocol_type(psd_profile_id, SaraR5Module.PSDProtocolType.IPV4)
-        self.AT_set_PSD_to_CID_mapping(psd_profile_id, cid_profile_id)
-        self.AT_get_PSD_profile_status(psd_profile_id, SaraR5Module.PSDParameters.ACTIVATION_STATUS)
-        if not self.psd["is_active"]:
-            self.AT_PSD_action(psd_profile_id, SaraR5Module.PSDAction.ACTIVATE)
+        #self._await_connection(roaming=False, timeout=60)
+        self.AT_set_EPS_network_reg_status(SaraR5Module.EPSNetworkRegistrationReportConfig.ENABLED)
+        self.AT_get_EPS_network_reg_status()
+        # self.AT_set_PSD_protocol_type(psd_profile_id, SaraR5Module.PSDProtocolType.IPV4)
+        # self.AT_set_PSD_to_CID_mapping(psd_profile_id, cid_profile_id)
+        # self.AT_get_PSD_profile_status(psd_profile_id, SaraR5Module.PSDParameters.ACTIVATION_STATUS)
+        # if not self.psd["is_active"]:
+        #     self.AT_PSD_action(psd_profile_id, SaraR5Module.PSDAction.ACTIVATE)
+
+    def close(self):
+        logger.info('Closing module')
+        self.terminate = True
+        self.read_thread.join()
+        self._serial.close()
 
     def setup_old(self, radio_mode='LTE-M'):
         """
@@ -341,20 +377,24 @@ class SaraR5Module:
 
     def AT_set_data_format(self, mode: HEXMode=HEXMode.DISABLED):
 
-        self._at_action(f'AT+UDCONF=1,{mode}')  # Set data format to HEX
+        self._send_command(f'AT+UDCONF=1,{mode}')  # Set data format to HEX
         logger.info(f'{mode.name} set to {mode.value}')
 
     def AT_read_imei(self):
         logger.info(f'Reading IMEI from module')
-        result = self._at_action('AT+CGSN')
+        result = self._send_command('AT+CGSN=1')
         self.imei = int(result[0])
 
+    def AT_set_echo(self, enabled:bool=False):
+        self._send_command(f'ATE{int(enabled)}', expected_reply=False)
+        logger.info(f'Echo {"enabled" if enabled else "disabled"}')
+
     def AT_set_error_format(self, format: ErrorFormat=ErrorFormat.DISABLED):
-        self._at_action(f'AT+CMEE={format}')  # enable verbose errors
-        logger.info('Verbose errors enabled')
+        self._send_command(f'AT+CMEE={format.value}',expected_reply=False)  # enable verbose errors
+        logger.info(f'Verbose errors {format.name}')
 
     def AT_set_MNO_profile(self, profile_id:MobileNetworkOperator):
-        self._at_action(f'AT+UMNOPROF={profile_id.value}')
+        self._send_command(f'AT+UMNOPROF={profile_id.value}',expected_reply=False)
         logger.info(f'Mobile Network Operator Profile set to {profile_id.name}')
 
 
@@ -384,21 +424,30 @@ class SaraR5Module:
     #     self._at_action('AT+UCGED=5')
 
     def AT_set_psm_mode(self, mode:PSMMode, periodic_tau:PSMPeriodicTau, active_time:PSMActiveTime):
-        self._at_action(f'AT+CPSMS={mode.value},,,{periodic_tau.value},{active_time.value}')
+        self._send_command(f'AT+CPSMS={mode.value},,,{periodic_tau.value},{active_time.value}', expected_reply=False, timeout=10)
         logger.info(f'PSM Mode set to {mode.name} with Periodic Tau {periodic_tau.name} and Active Time {active_time.name}')
 
-    def AT_config_signaling_connection_urc(self,config:SignallingConnectionStatusReportConfig=SignallingConnectionStatusReportConfig.DISABLED):
+    def AT_set_signaling_connection_urc(self,config:SignallingConnectionStatusReportConfig=SignallingConnectionStatusReportConfig.DISABLED):
         """
         Configure Signaling Connection URC
         """
-        self._at_action(f'AT+CSCON={config.value}')
+        self._send_command(f'AT+CSCON={config.value}',expected_reply=False)
         logger.info(f'{config.name} set to {config.value}')
 
-    def AT_config_EPS_network_reg_urc(self, config:EPSNetworkRegistrationReportConfig=EPSNetworkRegistrationReportConfig.DISABLED):
+    def AT_get_EPS_network_reg_status(self):
         """
         Configure EPS Network Registration URC
         """
-        self._at_action(f'AT+CEREG={config.value}')
+        result = self._send_command(f'AT+CEREG?',expected_reply=False) #False is correct!
+        #NOTE: URC handles reply 
+
+        #logger.info(f'{config.name} set to {config.value}')
+
+    def AT_set_EPS_network_reg_status(self, config:EPSNetworkRegistrationReportConfig=EPSNetworkRegistrationReportConfig.DISABLED):
+        """
+        Configure EPS Network Registration URC
+        """
+        self._send_command(f'AT+CEREG={config.value}',expected_reply=False)
         logger.info(f'{config.name} set to {config.value}')
 
     def AT_set_module_functionality(self,function:ModuleFunctionality=ModuleFunctionality.FULL_FUNCTIONALITY,reset:bool=None):
@@ -411,7 +460,7 @@ class SaraR5Module:
         if reset is not None:
             at_command+=f',{int(reset)}'
             logger_str+=f' with reset {reset}'
-        self._at_action(at_command)
+        self._send_command(at_command,expected_reply=False,timeout=180)
         logger.info(logger_str)
 
     def AT_read_module_functionality(self):
@@ -420,7 +469,7 @@ class SaraR5Module:
 
     def AT_set_radio_mode(self, mode:RadioAccessTechnology=RadioAccessTechnology.LTE_CAT_M1):
 
-        response = self._at_action(f'AT+URAT={mode.value}')
+        response = self._send_command(f'AT+URAT={mode.value},',expected_reply=False,timeout=10)
 
         self.current_rat = mode.name
         logger.info(f'Radio Access Technology set to {mode.name}')
@@ -440,7 +489,7 @@ class SaraR5Module:
         if pdp_type==SaraR5Module.PDPType.IPV6 and not validators.ipv6(pdp_address):
             raise ValueError("Invalid IPV6 address")
     
-        self._at_action(f'AT+CGDCONT={cid},"{pdp_type.value}","{apn}","{pdp_address}",{int(data_compression)},{int(header_compression)}')
+        self._send_command(f'AT+CGDCONT={cid},"{pdp_type.value}","{apn}","{pdp_address}",{int(data_compression)},{int(header_compression)}',expected_reply=False)
         logger.info(f'PDP Context set to {pdp_type.name} with APN {apn} and PDP Address {pdp_address}')
 
     def create_socket(self, socket_type='UDP', port: int = None):
@@ -475,8 +524,9 @@ class SaraR5Module:
         # return sock
 
     def AT_get_radio_statistics(self):
+        raise NotImplementedError
             
-        result = self._at_action('AT+UCGED?', capture_urc=True)
+        result = self._send_command('AT+UCGED?', capture_urc=True)
         if result[0] != b'+UCGED: 2':
             raise ValueError("Unexpected response received: {}".format(result[0]))
         
@@ -487,7 +537,7 @@ class SaraR5Module:
     def AT_set_PSD_protocol_type(self, profile_id:int=0,protocol_type:PSDProtocolType=PSDProtocolType.IPV4):
         if profile_id not in range (0, 7):
             raise ValueError('Profile ID must be between 0 and 6')
-        self._at_action(f'AT+UPSD={profile_id},0,{protocol_type.value}')
+        self._send_command(f'AT+UPSD={profile_id},0,{protocol_type.value}',expected_reply=False)
         logger.info(f'PSD Protocol Type set to {protocol_type.name}')
 
     def AT_set_PSD_to_CID_mapping(self, profile_id:int=0, cid:int=1):
@@ -495,13 +545,13 @@ class SaraR5Module:
             raise ValueError('Profile ID must be between 0 and 6')
         if cid not in range (0, 9):
             raise ValueError('CID must be between 0 and 8')
-        self._at_action(f'AT+UPSD={profile_id},100,{cid}')
+        self._send_command(f'AT+UPSD={profile_id},100,{cid}',expected_reply=False)
         logger.info(f'PSD Profile {profile_id} mapped to CID {cid}')
 
     def AT_PSD_action(self, profile_id:int=0, action:PSDAction=PSDAction.RESET):
         if profile_id not in range (0, 7):
             raise ValueError('Profile ID must be between 0 and 6')
-        self._at_action(f'AT+UPSDA={profile_id},{action.value}')
+        self._send_command(f'AT+UPSDA={profile_id},{action.value}',expected_reply=False,timeout=180)
         logger.info(f'PSD Profile {profile_id} took action {action.name}')
     
     def AT_set_power_saving_uart_mode(self, mode:PowerSavingUARTMode=PowerSavingUARTMode.DISABLED, idle_optimization:bool=None, timeout:int=None):
@@ -511,20 +561,21 @@ class SaraR5Module:
             raise ValueError('Timeout can only be used with PowerSavingUARTMode ENABLED or ENABLED_2')
         if timeout not in range (40, 65001):
             raise ValueError('Timeout must be between 40 and 65000')
+        
+        raise NotImplementedError
+        #self._send_command(f'AT+UPSV={mode.value}',expected_reply=False)
     
     def AT_get_PSD_profile_status(self, profile_id:int=0, parameter:PSDParameters=PSDParameters.IP_ADDRESS):
         if profile_id not in range (0, 7):
             raise ValueError('Profile ID must be between 0 and 6')
-        response_list = self._at_action(f'AT+UPSND={profile_id},{parameter.value}',capture_urc=True)
-
-        response = int(response_list[0].decode().split(':')[1].split(',')[2])
+        response_list = self._send_command(f'AT+UPSND={profile_id},{parameter.value}')
 
         if parameter == SaraR5Module.PSDParameters.IP_ADDRESS:
-            self.psd["ip"] = response
-            logger.info(f'PSD Profile {profile_id} IP Address is {response}')
+            self.psd["ip"] = response_list[2]
+            logger.info(f'PSD Profile {profile_id} IP Address is {self.psd["ip"]}')
 
         if parameter == SaraR5Module.PSDParameters.ACTIVATION_STATUS:
-            self.psd["is_active"] = bool(response)
+            self.psd["is_active"] = bool(int(response_list[2]))
             logger.info(f'PSD Profile {profile_id} Activation Status is {self.psd["is_active"]}')
 
         #TODO: support other parameters, e.g. QoS.
@@ -533,18 +584,18 @@ class SaraR5Module:
         if profile_id not in range (0, 2):
             raise ValueError('Profile ID must be between 0 and 1')
 
-        self._at_action(f'AT&W{profile_id}')
+        self._send_command(f'AT&W{profile_id}',expected_reply=False)
 
         logger.info(f'Stored current configuration to profile {profile_id}')
 
-    def AT_configure_eDRX(self, mode:eDRXMode, access_technology:eDRXAccessTechnology, requested_eDRX_cycle:eDRXCycle, requested_PTW:eDRXCycle):
-        self._at_action(f'AT+CEDRXS={mode.value},{access_technology.value},{requested_eDRX_cycle.value},{requested_PTW.value}')
+    def AT_set_eDRX(self, mode:eDRXMode, access_technology:eDRXAccessTechnology, requested_eDRX_cycle:eDRXCycle, requested_PTW:eDRXCycle):
+        self._send_command(f'AT+CEDRXS={mode.value},{access_technology.value},{requested_eDRX_cycle.value},{requested_PTW.value}',expected_reply=False)
         
         logger.info(f'eDRX configured with mode {mode.name}, access technology {access_technology.name}, requested eDRX cycle {requested_eDRX_cycle.name} and requested PTW {requested_PTW.name}')
 
     def AT_set_power_saving_mode_indication(self, enabled:bool):
-        self._at_action(f'AT+UPSMR={int(enabled)}')
-        logger.info(f'Power Saving Mode Indication set to {enabled}')
+        self._send_command(f'AT+UPSMR={int(enabled)}',expected_reply=False)
+        logger.info(f'Power Saving Mode Indication set to {enabled}',expected_reply=False)
 
     def AT_set_signalling_connection_status_indication(self, enabled:bool):
         raise NotImplementedError
@@ -632,7 +683,7 @@ class SaraR5Module:
         Upload data to the module's file system
         """
         SaraR5Module.validate_filename(filename)
-        self._at_action(f'AT+UDWNFILE="{filename}",{length}', data_input=data)
+        self._send_command(f'AT+UDWNFILE="{filename}",{length}',expected_reply=False, input_data=data)
         logger.info(f'Uploaded {length} bytes to {filename}')
 
     def upload_local_file_to_filesystem(self, filepath_in, filename_out, overwrite=False):
@@ -653,19 +704,19 @@ class SaraR5Module:
 
     def AT_read_file(self, filename, timeout=10):
         SaraR5Module.validate_filename(filename)
-        return self._at_action(f'AT+URDFILE="{filename}"',timeout=timeout, capture_urc=True, binary_cmd=True, preserve_endings=True)
+        return self._send_command(f'AT+URDFILE="{filename}"',timeout=timeout)
     
     def AT_read_file_blocks(self, filename, offset:int, length:int):
         SaraR5Module.validate_filename(filename)
         if not isinstance(offset, int) or not isinstance(length, int):
             raise ValueError('Offset and length must be integers')
                              
-        return self._at_action(f'AT+URDBLOCK="{filename}",{offset},{length}',binary_cmd=True)
+        return self._send_command(f'AT+URDBLOCK="{filename}",{offset},{length}')
     
     def AT_delete_file(self, filename):
         SaraR5Module.validate_filename(filename)
 
-        self._at_action(f'AT+UDELFILE="{filename}"')
+        self._send_command(f'AT+UDELFILE="{filename}"')
         logger.info(f'Deleted file {filename}')
 
     def _await_connection(self, roaming, timeout=180):
@@ -677,7 +728,7 @@ class SaraR5Module:
         start_time = time.time()
         while True:
             time.sleep(2)
-            self._at_action('AT+CEREG?')
+            self.AT_get_EPS_network_reg_status() #triggers URC
 
             if self.registration_status == 0:
                 continue
@@ -692,142 +743,142 @@ class SaraR5Module:
             if elapsed_time > timeout:
                 raise ConnectionTimeoutError(f'Could not connect')
             
-    def _at_action(self, at_command, timeout=10, capture_urc=False, binary_cmd=False, data_input=None, preserve_endings=False):
-        """
-        Small wrapper to issue a AT command. Will wait for the Module to return
-        OK. Some modules return answers to AT actions as URC:s before the OK
-        and to handle them as IRCs it is possible to set the capture_urc flag
-        and all URCs between the at action and OK will be returned as result.
-        """
-        logger.debug(f'Applying AT Command: {at_command}')
-        self._write(at_command,binary_cmd=binary_cmd)
-        time.sleep(0.02)  # To give the end devices some time to answer.
-        if data_input:
-            self._read_line_until_contains(b'>', timeout=timeout,
-                                             capture_urc=False)
-            self._write(data_input)
+    # def _at_action(self, at_command, timeout=10, capture_urc=False, binary_cmd=False, data_input=None, preserve_endings=False):
+    #     """
+    #     Small wrapper to issue a AT command. Will wait for the Module to return
+    #     OK. Some modules return answers to AT actions as URC:s before the OK
+    #     and to handle them as IRCs it is possible to set the capture_urc flag
+    #     and all URCs between the at action and OK will be returned as result.
+    #     """
+    #     logger.debug(f'Applying AT Command: {at_command}')
+    #     self._write(at_command,binary_cmd=binary_cmd)
+    #     time.sleep(0.02)  # To give the end devices some time to answer.
+    #     if data_input:
+    #         self._read_line_until_contains(b'>', timeout=timeout,
+    #                                          capture_urc=False)
+    #         self._write(data_input)
         
-        irc = self._read_line_until_contains(b'OK', timeout=timeout,
-                                                capture_urc=capture_urc,preserve_endings=preserve_endings)
-        if irc is not None:
-            logger.debug(f'AT Command response = {irc}')
-        return irc
+    #     irc = self._read_line_until_contains(b'OK', timeout=timeout,
+    #                                             capture_urc=capture_urc,preserve_endings=preserve_endings)
+    #     if irc is not None:
+    #         logger.debug(f'AT Command response = {irc}')
+    #     return irc
 
-    def _write(self, data, binary_cmd=False):
-        """
-        Writing data to the module is simple. But it needs to end with \r\n
-        to accept the command. The module will answer with an empty line as
-        acknowledgement. If echo is enabled everything that the is sent to the
-        module is returned in the serial line. So we just need to omit it from
-        the acknowledge.
-        """
-        data_to_send = data
-        if isinstance(data, str):  # if someone sent in a string make it bytes
-            data_to_send = data.encode()
+    # def _write(self, data, binary_cmd=False):
+    #     """
+    #     Writing data to the module is simple. But it needs to end with \r\n
+    #     to accept the command. The module will answer with an empty line as
+    #     acknowledgement. If echo is enabled everything that the is sent to the
+    #     module is returned in the serial line. So we just need to omit it from
+    #     the acknowledge.
+    #     """
+    #     data_to_send = data
+    #     if isinstance(data, str):  # if someone sent in a string make it bytes
+    #         data_to_send = data.encode()
 
-        if not data_to_send.endswith(b'\r\n'):
-            # someone didnt add the CR an LN so we need to send it
-            data_to_send += b'\r\n'
+    #     if not data_to_send.endswith(b'\r\n'):
+    #         # someone didnt add the CR an LN so we need to send it
+    #         data_to_send += b'\r\n'
 
-        # start_time = time.time()
+    #     # start_time = time.time()
 
-        self._serial.write(data_to_send)
-        time.sleep(0.02)  # To give the module time to respond.
-        logger.debug(f'Sent: {data_to_send}')
+    #     self._serial.write(data_to_send)
+    #     time.sleep(0.02)  # To give the module time to respond.
+    #     logger.debug(f'Sent: {data_to_send}')
 
-        ack = self._serial.read_until()
-        logger.debug(f'Recieved ack: {ack}')
+    #     ack = self._serial.read_until()
+    #     logger.debug(f'Recieved ack: {ack}')
 
-        if self.echo:
-            # when echo is on we will have recieved the message we sent and
-            # will get it in the ack response read. But it will not send \n.
-            # so we can omitt the data we send + i char for the \r
-            #TODO ack can be \n or \r\n
-            _echo = ack[:-1] if binary_cmd else ack[:-2] 
-            wanted_echo = data_to_send[:-2] + b'\r'
-            if _echo != wanted_echo:
-                raise ValueError(f'Data echoed from module: {_echo} is not the '
-                                 f'same data as sent to the module. Expected echo: {wanted_echo}')
-            ack = ack[len(wanted_echo):]
+    #     if self.echo:
+    #         # when echo is on we will have recieved the message we sent and
+    #         # will get it in the ack response read. But it will not send \n.
+    #         # so we can omitt the data we send + i char for the \r
+    #         #TODO ack can be \n or \r\n
+    #         _echo = ack[:-1] if binary_cmd else ack[:-2] 
+    #         wanted_echo = data_to_send[:-2] + b'\r'
+    #         if _echo != wanted_echo:
+    #             raise ValueError(f'Data echoed from module: {_echo} is not the '
+    #                              f'same data as sent to the module. Expected echo: {wanted_echo}')
+    #         ack = ack[len(wanted_echo):]
 
-        wanted_ack = [b'\n',b'\r\n'] if binary_cmd else [b'\r\n']
-        if ack == b'':
-            raise ATAckMissingError(f'Ack was not received')
-        if ack not in wanted_ack:
-            raise ATAckError(f'Ack was not received properly, received {ack}, expected {wanted_ack}')
+    #     wanted_ack = [b'\n',b'\r\n'] if binary_cmd else [b'\r\n']
+    #     if ack == b'':
+    #         raise ATAckMissingError(f'Ack was not received')
+    #     if ack not in wanted_ack:
+    #         raise ATAckError(f'Ack was not received properly, received {ack}, expected {wanted_ack}')
         
-    @staticmethod
-    def _remove_line_ending(line: bytes):
-        """
-        To not have to deal with line endings in the data we can use this to
-        remove them.
-        """
-        if line.endswith(b'\r\n'):
-            return line[:-2]
-        else:
-            return line
+    # @staticmethod
+    # def _remove_line_ending(line: bytes):
+    #     """
+    #     To not have to deal with line endings in the data we can use this to
+    #     remove them.
+    #     """
+    #     if line.endswith(b'\r\n'):
+    #         return line[:-2]
+    #     else:
+    #         return line
         
-    def _read_line_until_contains(self, slice, capture_urc=False, timeout=5, preserve_endings=False):
-        """
-        Similar to read_until, but will read whole lines so we can use proper
-        timeout management. Any URC:s that is read will be handled and we will
-        return the IRC:s collected. If capture_urc is set we will return all
-        data as IRCs.
-        """
-        _slice = slice
-        if isinstance(slice, str):
-            _slice = slice.encode()
+    # def _read_line_until_contains(self, slice, capture_urc=False, timeout=5, preserve_endings=False):
+    #     """
+    #     Similar to read_until, but will read whole lines so we can use proper
+    #     timeout management. Any URC:s that is read will be handled and we will
+    #     return the IRC:s collected. If capture_urc is set we will return all
+    #     data as IRCs.
+    #     """
+    #     _slice = slice
+    #     if isinstance(slice, str):
+    #         _slice = slice.encode()
 
-        data_list = list()
-        irc_list = list()
-        start_time = time.time()
-        while True:
-            try:
-                data = self._serial.read_until()
-            except serial.SerialTimeoutException:
-                # continue to read lines until AT Timeout
-                duration = time.time() - start_time
-                if duration > timeout:
-                    raise ATTimeoutError
-                continue
-            line_stripped = self._remove_line_ending(data) 
-            line = data if preserve_endings else line_stripped
+    #     data_list = list()
+    #     irc_list = list()
+    #     start_time = time.time()
+    #     while True:
+    #         try:
+    #             data = self._serial.read_until()
+    #         except serial.SerialTimeoutException:
+    #             # continue to read lines until AT Timeout
+    #             duration = time.time() - start_time
+    #             if duration > timeout:
+    #                 raise ATTimeoutError
+    #             continue
+    #         line_stripped = self._remove_line_ending(data) 
+    #         line = data if preserve_endings else line_stripped
 
-            if line_stripped.startswith(b'+'):
-                if capture_urc:
-                    irc_list.append(line_stripped)  # add the urc as an irc
-                else:
-                    self._process_urc(line_stripped)
+    #         if line_stripped.startswith(b'+'):
+    #             if capture_urc:
+    #                 irc_list.append(line_stripped)  # add the urc as an irc
+    #             else:
+    #                 self._process_urc(line_stripped)
 
-            elif line_stripped == b'OK':
-                pass
+    #         elif line_stripped == b'OK':
+    #             pass
 
-            elif line_stripped.startswith(b'ERROR'):
-                raise ATError('Error on AT Command')
+    #         elif line_stripped.startswith(b'ERROR'):
+    #             raise ATError('Error on AT Command')
 
-            elif line_stripped == b'':
-                pass
+    #         elif line_stripped == b'':
+    #             pass
 
-            else:
-                irc_list.append(line)  # the can only be an IRC
+    #         else:
+    #             irc_list.append(line)  # the can only be an IRC
 
-            if _slice == line_stripped:              
-                data_list.append(line)
-                break
-            else:
-                data_list.append(line)
+    #         if _slice == line_stripped:              
+    #             data_list.append(line)
+    #             break
+    #         else:
+    #             data_list.append(line)
 
-            duration = time.time() - start_time
-            if duration > timeout:
-                raise ATTimeoutError
+    #         duration = time.time() - start_time
+    #         if duration > timeout:
+    #             raise ATTimeoutError
 
-        clean_list = [response for response in data_list if not response == b'']
+    #     clean_list = [response for response in data_list if not response == b'']
 
-        logger.debug(f'Received: {clean_list}')
+    #     logger.debug(f'Received: {clean_list}')
 
-        return irc_list
+    #     return irc_list
     
-    def toggle_power(self):
+    def toggle_power(self, at_test=True):
         """
         Toggles the power of the module
         """
@@ -836,9 +887,9 @@ class SaraR5Module:
         #TODO: _await_vin() to check if power has been toggled
         #TODO: if power is on, wait for AT command reply
         #loop until AT returns OK
-        while True:
+        while at_test:
             try: 
-                self._at_action('AT',timeout=1)
+                self._send_command('AT',expected_reply=False,timeout=1)
                 break 
             except ATTimeoutError:
                 continue 
@@ -1026,3 +1077,144 @@ class SaraR5Module:
         for char in invalid_chars:
             if char in filename:
                 raise ValueError(f'Invalid character {char} in filename') 
+    
+    def _read_from_device(self):
+        while not self.terminate:
+            data = self._serial.readline()
+            timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            if data:
+                timestamp = datetime.datetime.now()
+                data_with_timestamp = (data, timestamp)
+                if any(data.decode().startswith(prefix) for prefix in self.urc_mappings.keys()):
+                    logger.debug(f"URC:{chr(10)}          {timestamp}: {data}")
+                    urc = data.split(b":")[0].decode()
+                    urc_data = data.split(b":")[1].decode()
+                    handler_function = self.urc_mappings[urc]
+                    handler_function(urc_data)
+                elif data == b'':
+                    pass
+                else:
+                    self.queue.put(data_with_timestamp)
+
+    def handle_uupsdd(self, data):
+        # Handle unsolicited result code (URC) here
+        # with self.lock:
+        #     self.disconnected = True
+        pass
+    def handle_cereg(self, data):
+        # CEREG is a special case, may be a read response or a URC. Some logic needed to determine which.
+        data = data.lstrip('\r\n').split(",")
+        Mode = None
+
+        if int(data[0]) not in [0,1]: 
+            mode = "Read"
+        elif len(data) > 2:
+            mode = "URC"
+        elif len(data) == 2:
+            mode = "Read"
+        else:
+            assert(len(data) == 1)
+            mode = "URC" 
+        
+        read_parameters=["mode","registration_status","tracking_area_code","cell_id","access_tech","reject_cause_type","assigned_active_time","assigned_tau","rac_or_mme"]
+        parsed_result = {}
+
+        if mode == "Read":
+            for i, parameter in enumerate(read_parameters):
+                if i < len(data):
+                    parsed_result[parameter] = data[i].strip()
+        if mode == "URC":
+            for i, parameter in enumerate(read_parameters[1:]):
+                if i < len(data):
+                    parsed_result[parameter] = data[i].strip()
+        
+        #iterate through parsed parameters
+        for key, value in parsed_result.items():
+            if key == "mode":
+                parsed_result[key] = SaraR5Module.EPSNetworkRegistrationReportConfig(int(value))
+            if key == "registration_status":
+                parsed_result[key] = SaraR5Module.EPSNetworkRegistrationStatus(int(value))
+            if key == "tracking_area_code":
+                parsed_result[key] = str(value)
+            if key == "cell_id":
+                parsed_result[key] = str(value)
+            if key == "access_tech":
+                parsed_result[key] = int(value)
+            if key == "cause_type":
+                parsed_result[key] = int(value)
+            if key == "assigned_active_time":
+                parsed_result[key] = str(value)
+            if key == "assigned_tau":
+                parsed_result[key] = str(value)
+            if key == "rac_or_mme":
+                parsed_result[key] = str(value)
+
+
+        logger.info(f"CEREG {mode} response: {parsed_result}")
+
+    def _send_command(self, command:str, expected_reply=True, input_data:bytes=None, timeout=10):
+        """
+        expected reply is None, str or bool
+            str:            reply expected with prefix (e.g. "UPSND")
+            bool(True):     reply expected with prefix matching command (e.g. "AT+UPSND=0,8" expects "+UPSND: 0,8")
+            bool(False):    no reply expected
+        """
+
+        if not isinstance(expected_reply, (bool, str)): 
+            raise TypeError("expected_reply is not of type bool or str")
+       
+        result = None 
+        got_ok = False
+        got_reply = False
+        debug_log = []
+
+        if expected_reply == True:
+            expected_reply_bytes = command.lstrip("AT").split("=")[0].encode() + b":"
+        if expected_reply == False:
+            got_reply=True
+        if isinstance(expected_reply,str):
+            expected_reply_bytes = b"+" + expected_reply.encode() + b":"
+
+        command_unterminated = command.encode().rstrip(b"\r\n")
+        command = command_unterminated + b"\r\n"
+
+        self._serial.write(command)
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        logger.debug(f"Sent:{chr(10)}          {timestamp}: {command}")
+        
+        timeout_time = time.time() + timeout
+        try:
+            while not (got_ok and got_reply):
+                time_remaining = timeout_time - time.time()
+                if time_remaining <= 0:
+                    raise ATTimeoutError("Timeout waiting for response")
+                try:
+                    response_with_timestamp:tuple = self.queue.get(timeout=time_remaining)
+                    response, timestamp = response_with_timestamp
+                    debug_log.append((timestamp, response))
+                except queue.Empty:
+                    continue
+
+                if response.startswith(b"OK"):
+                    got_ok = True
+                elif expected_reply != False and response.startswith(expected_reply_bytes):
+                    got_reply = True
+                    result = response.lstrip(expected_reply_bytes).rstrip(b"\r\n").decode().strip().split(",")
+                elif response.startswith(b"ERROR"):
+                    raise ATError
+                elif response.startswith(b"+CME ERROR:"):
+                    code = response.lstrip(b"+CME ERROR:").rstrip(b"\r\n").decode()
+                    raise CMEError(code) #TODO: convert code to error message
+                elif response == b"\r\n" or response.startswith(command_unterminated): # ack or echo
+                    pass
+                elif input_data and len(input_data) > 0 and response.startswith(b">"):
+                    self.ser.write(input_data)
+                else:
+                    logger.warn(f'WARNING: got unexpected {response}')
+        except Exception as e:
+            raise e
+        finally:
+            output = '\n          '.join([f'{timestamp.strftime("%Y-%m-%d_%H-%M-%S")}: {response}' for timestamp, response in debug_log])
+            logger.debug(f"Received:{chr(10)}          {output}")
+
+        return result

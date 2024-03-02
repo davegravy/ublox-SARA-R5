@@ -82,18 +82,18 @@ class SecurityProfile:
             self.AT_set_client_key(client_key)
 
     def AT_reset_security_profile(self):
-        self._module._at_action(f'AT+USECPRF={self.profile_id}') # reset
+        self._module._send_command(f'AT+USECPRF={self.profile_id}') # reset
         self.hostname_ca_validation = ""
         self.hostname_sni = ""
 
         logger.info(f"Reset security profile {self.profile_id}")
 
     def AT_set_ca_validation_level(self, level:CAValidationLevel=CAValidationLevel.LEVEL_1_LOCAL_CERT_CHECK):
-        self._module._at_action(f'AT+USECPRF={self.profile_id},0,{level.value}')
+        self._module._send_command(f'AT+USECPRF={self.profile_id},0,{level.value}')
         logger.info(f"Set CA validation level to {level.name} for security profile {self.profile_id}")
     
     def AT_set_tls_version(self, version:TLSVersion=TLSVersion.TLS_1_2):
-        self._module._at_action(f'AT+USECPRF={self.profile_id},1,{version.value}')
+        self._module._send_command(f'AT+USECPRF={self.profile_id},1,{version.value}')
         logger.info(f"Set TLS version to {version.name} for security profile {self.profile_id}")
 
     def AT_set_ca_validation_server_hostname(self, hostname:str=""):
@@ -102,7 +102,7 @@ class SecurityProfile:
         if not validators.domain(hostname):
             raise ValueError("Invalid server hostname")
 
-        self._module._at_action(f'AT+USECPRF={self.profile_id},4,"{hostname}"')
+        self._module._send_command(f'AT+USECPRF={self.profile_id},4,"{hostname}"')
         self.hostname_ca_validation = hostname
         logger.info(f'Set CA validation server hostname to "{hostname}" for security profile {self.profile_id}')
     
@@ -112,7 +112,7 @@ class SecurityProfile:
         if not validators.domain(sni):
             raise ValueError("Invalid server hostname")
 
-        self._module._at_action(f'AT+USECPRF={self.profile_id},10,"{sni}"')
+        self._module._send_command(f'AT+USECPRF={self.profile_id},10,"{sni}"')
         self.hostname_sni = sni
         logger.info(f'Set server name indication to "{sni}" for security profile {self.profile_id}')
 
@@ -120,21 +120,21 @@ class SecurityProfile:
     # DOES NOT ERROR IF CERT DOES NOT EXIST, VALIDATE BEFORE CALLING THIS
         SecurityProfile.validate_cert_name(internal_name)
         
-        self._module._at_action(f'AT+USECPRF={self.profile_id},3,"{internal_name}"')
+        self._module._send_command(f'AT+USECPRF={self.profile_id},3,"{internal_name}"')
         logger.info(f'Set CA cert to "{internal_name}" for security profile {self.profile_id}')
 
     def AT_set_client_cert(self, internal_name:str=""):
     # DOES NOT ERROR IF CERT DOES NOT EXIST, VALIDATE BEFORE CALLING THIS
         SecurityProfile.validate_cert_name(internal_name)
         
-        self._module._at_action(f'AT+USECPRF={self.profile_id},5,"{internal_name}"')
+        self._module._send_command(f'AT+USECPRF={self.profile_id},5,"{internal_name}"')
         logger.info(f'Set client cert to "{internal_name}" for security profile {self.profile_id}')
 
     def AT_set_client_key(self, internal_name:str=""):
     # DOES NOT ERROR IF CERT DOES NOT EXIST, VALIDATE BEFORE CALLING THIS
         SecurityProfile.validate_cert_name(internal_name)
         
-        self._module._at_action(f'AT+USECPRF={self.profile_id},6,"{internal_name}"')
+        self._module._send_command(f'AT+USECPRF={self.profile_id},6,"{internal_name}"')
         logger.info(f'Set client key to "{internal_name}" for security profile {self.profile_id}')
     
     def AT_get_cert_md5(module:'SaraR5Module', type:CertificateType, internal_name):
@@ -143,7 +143,7 @@ class SecurityProfile:
         
         # errors if not found or invalid
         try:
-            result = module._at_action(f'AT+USECMNG=4,{type.value},"{internal_name}"',capture_urc=True)
+            result = module._send_command(f'AT+USECMNG=4,{type.value},"{internal_name}"',capture_urc=True)
         except modules.ATError:
             return None
         
@@ -154,7 +154,7 @@ class SecurityProfile:
         SecurityProfile.validate_cert_name(internal_name)
         SaraR5Module.validate_filename(filename)
         
-        module._at_action(f'AT+USECMNG=1,{type.value},"{internal_name}","{filename}"',capture_urc=True)
+        module._send_command(f'AT+USECMNG=1,{type.value},"{internal_name}","{filename}"',capture_urc=True)
         logger.info(f'Imported {type.name} from file "{filename}" to internal name {internal_name}')
 
     def validate_cert_name(internal_name:str):
@@ -321,7 +321,7 @@ class HTTPClient:
         return error_codes[self.error_code]
     
     def AT_reset_http_profile(self):
-        self._module._at_action(f'AT+UHTTP={self.profile_id}')
+        self._module._send_command(f'AT+UHTTP={self.profile_id}')
         self.hostname = ""
         self.port = 80
         self.ssl = False
@@ -335,14 +335,14 @@ class HTTPClient:
     def AT_set_http_server_ip(self, ip:str):
         if not validators.ipv4(ip): raise ValueError("Invalid IPV4 address")
 
-        self._module._at_action(f'AT+UHTTP={self.profile_id},0,"{ip}"')
+        self._module._send_command(f'AT+UHTTP={self.profile_id},0,"{ip}"')
         logger.info(f"Set HTTP server IP to {ip} for HTTP profile {self.profile_id}") 
 
     def AT_set_http_server_hostname(self, hostname):
         if len(hostname) not in range (1,1024): raise ValueError("Hostname must be 1 to 1024")
         if not validators.domain(hostname): raise ValueError("Invalid hostname")
 
-        self._module._at_action(f'AT+UHTTP={self.profile_id},1,"{hostname}"')
+        self._module._send_command(f'AT+UHTTP={self.profile_id},1,"{hostname}"')
         self.hostname = hostname
         logger.info(f'Set HTTP server hostname to "{hostname}" for HTTP profile {self.profile_id}')
 
@@ -350,7 +350,7 @@ class HTTPClient:
         if port < 1 or port > 65535: raise ValueError("Port must be between 1 and 65535")
         if not isinstance(port, int): raise ValueError("Port must be an integer")
 
-        self._module._at_action(f'AT+UHTTP={self.profile_id},5,{port}')
+        self._module._send_command(f'AT+UHTTP={self.profile_id},5,{port}')
         self.server_port = port
         logger.info(f"Set HTTP server port to {port} for HTTP profile {self.profile_id}")
     
@@ -364,14 +364,14 @@ class HTTPClient:
         logger.debug(f'security_profile_id: {security_profile_id}')
         if isinstance(security_profile_id, int):
             at_command = at_command + f',{security_profile_id}'
-        self._module._at_action(at_command)
+        self._module._send_command(at_command)
         self.ssl = ssl == HTTPClient.HTTPSConfig.ENABLED
         logger.info(f"Set HTTP SSL to {ssl.name} for HTTP profile {self.profile_id}")
 
     def AT_set_http_timeout(self, timeout:int=180):
         if not timeout in range(30,180): 
             raise ValueError("Timeout must be between 30 and 180 seconds")
-        self._module._at_action(f'AT+UHTTP={self.profile_id},7,{timeout}')
+        self._module._send_command(f'AT+UHTTP={self.profile_id},7,{timeout}')
         self.timeout = timeout
         logger.info(f"Set HTTP timeout to {timeout} seconds for HTTP profile {self.profile_id}")
 
@@ -382,7 +382,7 @@ class HTTPClient:
         if header_string.count(":") != 2 and not (len(header_string) == 2 and header_string[0].isdigit() and header_string[1] == ':'):
             raise ValueError(f'Invalid format for header string "{header_string}", required format <id:key:value> or <id:>')
 
-        self._module._at_action(f'AT+UHTTP={self.profile_id},9,"{header_string}"')
+        self._module._send_command(f'AT+UHTTP={self.profile_id},9,"{header_string}"')
         logger.info(f'Set HTTP header to "{header_string}" for HTTP profile {self.profile_id}')
     
     def AT_http_get(self, server_path:str, response_filename:str):
@@ -390,7 +390,7 @@ class HTTPClient:
         HTTPClient.validate_server_path(server_path)
         SaraR5Module.validate_filename(response_filename)
 
-        self._module._at_action(f'AT+UHTTPC={self.profile_id},1,"{server_path}","{response_filename}"')
+        self._module._send_command(f'AT+UHTTPC={self.profile_id},1,"{server_path}","{response_filename}"')
         self.server_path = server_path
         self._await_http_response(self, timeout = self.timeout)
         
@@ -407,13 +407,13 @@ class HTTPClient:
                 if self.hostname != getattr(self.security_profile, attr):
                     logger.warning(f'Security profile {attr} "{getattr(self.security_profile, attr)}" does not match HTTP profile hostname "{self.hostname}"')
 
-        self._module._at_action(f'AT+UHTTPC={self.profile_id},4,"{server_path}","{response_filename}","{send_filename}", {content_type.value}')
+        self._module._send_command(f'AT+UHTTPC={self.profile_id},4,"{server_path}","{response_filename}","{send_filename}", {content_type.value}')
         self.server_path = server_path
         self._await_http_response(self,timeout = self.timeout)
         logger.info(f'HTTP POST request to "{self.url}" for HTTP profile {self.profile_id}')
 
     def AT_http_get_error(self):
-        result = self._module._at_action(f'AT+UHTTPER={self.profile_id}',capture_urc=True)
+        result = self._module._send_command(f'AT+UHTTPER={self.profile_id}',capture_urc=True)
 
         if not type(result) == list and len(result) == 1:
             raise ValueError(f'error format unexpected: {result}')
@@ -440,7 +440,7 @@ class HTTPClient:
         
         while True:
             time.sleep(2)
-            self._module._at_action(f'AT') # poll for URCs
+            self._module._send_command(f'AT') # poll for URCs
 
             if self.completed == 0:
                 continue

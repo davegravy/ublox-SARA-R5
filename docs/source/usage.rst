@@ -36,14 +36,14 @@ Configure module
 
 We are running tests in Sweden and have defined settings to configure the module
 to work for operators in Sweden. You can set the module up using the .setup()
-method or use lower API method ._at_action() to set the module up exactly as you
+method or use lower API method ._send_command() to set the module up exactly as you
 want.
 
 .. code-block:: python
 
     module.setup()
     # or
-    module._at_action('AT+CFUN=1')
+    module._send_command('AT+CFUN=1')
 
 There are also methods that wrap common at actions that are documented on the
 module class.
