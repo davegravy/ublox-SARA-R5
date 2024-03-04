@@ -524,6 +524,9 @@ class HTTPClient:
         Returns:
             HTTPResponse: The response object containing the data received from the server.
         """
+        #TODO: split into two functions: prep and send, prep can be done with radio disabled
+        # since it only needs to write to the file system
+        
         data = None
 
         payload_filename = payload_file.split('/')[-1]
@@ -843,7 +846,7 @@ class HTTPClient:
         logging.info('Awaiting HTTP Response')
 
         start_time = time.time()
-        
+
         while True:
             time.sleep(0.25)
 
@@ -857,19 +860,6 @@ class HTTPClient:
             if elapsed_time > timeout:
                 raise ConnectionTimeoutError(f'Could not connect in {timeout} seconds')
 
-    # def _update_http_callback(module:'SaraR5Module', urc: bytes):
-    #     """
-    #     Callback to handle HTTP responses
-    #     """
-    #     logger.info(f'HTTP Response: {urc}')
-    #     _urc, data = urc.split(b':')
-    #     data = data.split(b',')
-    #     profile_id = int(data[0])
-    #     #no use for data[1] which is the http command type (get,post,etc)
-    #     status = int(data[2])
-    #     http_profile:HTTPClient = module.http_profiles[profile_id]
-    #     http_profile.completed = True
-    #     http_profile.error = status == 0
     @staticmethod
     def handle_uuhttpcr(module, data):
         """

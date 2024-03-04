@@ -250,3 +250,46 @@ class PSMActiveTime(Enum):
     _2_hrs_54_mins =  "01011101"
     _3_hrs =  "01011110"
     _3_hrs_6_mins =  "01011111"
+
+class EDRXMode(Enum):
+    """
+    Represents the eDRX mode.
+
+    AT Command: AT+CEDRXS=<eDRXMode>,<eDRXAccessTechnology>,<eDRXCycle>
+    """
+    DISABLED = 0
+    ENABLED = 1
+    ENABLED_WITH_URC = 2
+    DISABLED_AND_RESET = 3
+
+class EDRXAccessTechnology(Enum):
+    """
+    Represents the eDRX access technology.
+
+    AT Command: AT+CEDRXS=<eDRXMode>,<eDRXAccessTechnology>,<eDRXCycle>
+    """
+    EUTRAN_WB_S1 = 4
+    EUTRAN_NB_S1 = 5
+
+class EDRXCycle(Enum):
+    """
+    Represents the eDRX cycle.
+
+    AT Command: AT+CEDRXS=<eDRXMode>,<eDRXAccessTechnology>,<eDRXCycle>
+    """
+    T_5_12 = '0000'
+    T_10_24 = '0001'
+    T_20_48 = '0010'
+    T_40_96 = '0011'
+    T_81_92 = '0100'
+    T_163_84 = '0101'
+    T_327_68 = '0110'
+    T_655_36 = '0111'
+    T_1310_72 = '1000'
+    T_2621_44 = '1001'
+    T_5242_88 = '1010'
+    T_10485_76 = '1011'
+    T_20971_52 = '1100'
+    T_41943_04 = '1101'
+    T_83886_08 = '1110'
+    T_167772_16 = '1111'
