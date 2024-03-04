@@ -526,14 +526,14 @@ class HTTPClient:
         """
         #TODO: split into two functions: prep and send, prep can be done with radio disabled
         # since it only needs to write to the file system
-        
+
         data = None
 
         payload_filename = payload_file.split('/')[-1]
         result_filename = ''.join(random.choice(string.ascii_lowercase) for i in range(10))
         self._module.upload_local_file_to_fs(
             payload_file, payload_filename, overwrite=True)
-        #TODO timeout for large files
+        #TODO: timeout for large files
         self.at_http_post(server_path, result_filename, payload_filename, content_type)
         if self.error:
             error_class, error_code = self.at_http_get_error()

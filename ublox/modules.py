@@ -331,10 +331,10 @@ class SaraR5Module:
         PSM_BLOCKED = 2
         PARTIAL_PSM_CLIENT_BLOCKING = 3
 
-    def __init__(self, serial_port: str, baudrate=115200, rtscts=False, 
-                 roaming=False, echo=True, 
+    def __init__(self, serial_port: str, baudrate=115200, rtscts=False,
+                 roaming=False, echo=True,
                  power_toggle: Callable[[], None] = None):
-        
+
         self.power_toggle = power_toggle if power_toggle \
             else lambda: (_ for _ in ()).throw(
                 NotImplementedError("Power toggle function needs to be configured"))
@@ -384,8 +384,8 @@ class SaraR5Module:
             os.remove(receive_log_name)
         if os.path.exists(send_log_name):
             os.remove(send_log_name)
-        self.receive_log = open(receive_log_name, 'a')
-        self.send_log = open(send_log_name, 'a')
+        self.receive_log = open(receive_log_name, 'a',encoding='utf-8')
+        self.send_log = open(send_log_name, 'a', encoding='utf-8')
 
         self.read_thread.start()
 
@@ -466,14 +466,14 @@ class SaraR5Module:
         self.at_set_edrx(EDRXMode.DISABLED)
         self.at_set_power_saving_mode_urc(power_saving_mode)
         self.at_set_signalling_cx_urc(
-            SaraR5Module.SignalCxReportConfig.ENABLED_MODE_ONLY if power_saving_mode 
+            SaraR5Module.SignalCxReportConfig.ENABLED_MODE_ONLY if power_saving_mode
             else SaraR5Module.SignalCxReportConfig.DISABLED)
-        
+
         self.at_store_current_configuration()
 
         self.at_set_psm_mode(
-            SaraR5Module.PSMMode.ENABLED if power_saving_mode else SaraR5Module.PSMMode.DISABLED
-            , periodic_tau=PSMPeriodicTau._4_hrs_30_mins, active_time=PSMActiveTime._14_secs)
+            SaraR5Module.PSMMode.ENABLED if power_saving_mode else SaraR5Module.PSMMode.DISABLED,
+            periodic_tau=tau, active_time=active_time)
 
     def close(self):
         """
@@ -731,8 +731,8 @@ class SaraR5Module:
         """
         Get the EPS network registration status.
 
-        This method sends the 'AT+CEREG?' command to the module to retrieve the EPS network registration status.
-        The response is handled by the URC (Unsolicited Result Code) mechanism.
+        This method sends the 'AT+CEREG?' command to the module to retrieve the EPS network 
+        registration status. The response is handled by the URC (Unsolicited Result Code) mechanism.
 
         Returns:
             None
@@ -920,7 +920,7 @@ class SaraR5Module:
         #TODO: support other parameters, e.g. QoS.
 
 # Low power
-        
+
     def at_set_power_saving_uart_mode(self, mode:PowerSavingUARTMode=PowerSavingUARTMode.DISABLED,
                                       timeout:int=None, idle_optimization:bool=None):
         """
@@ -943,7 +943,7 @@ class SaraR5Module:
             and mode != SaraR5Module.PowerSavingUARTMode.ENABLED_2:
             raise ValueError('Timeout can only be used with \
                                 PowerSavingUARTMode ENABLED or ENABLED_2')
-            
+
         if timeout is not None and timeout not in range(40, 65001):
             raise ValueError('Timeout must be between 40 and 65000')
 
@@ -957,9 +957,9 @@ class SaraR5Module:
             at_command += f',{int(idle_optimization)}'
         self.send_command(at_command, expected_reply=False)
         logger.info(logger_str)
-        
+
     def at_set_edrx(self, mode:EDRXMode, access_technology:EDRXAccessTechnology=None,
-                         requested_eDRX_cycle:EDRXCycle=None, requested_PTW:EDRXCycle=None):
+                         requested_edrx_cycle:EDRXCycle=None, requested_ptw:EDRXCycle=None):
         """
         Sets the eDRX (extended Discontinuous Reception) parameters.
 
@@ -971,25 +971,26 @@ class SaraR5Module:
             requested_PTW (EDRXCycle, optional): The requested Paging Time Window (PTW).
         """
         if mode != EDRXMode.DISABLED and \
-        not all([access_technology, requested_eDRX_cycle, requested_PTW]):
+        not all([access_technology, requested_edrx_cycle, requested_ptw]):
             raise ValueError('Access technology, eDRX cycle and PTW must be specified '
                              'when eDRX is enabled')
 
-        logger_string = 'eDRX configured with mode {}'.format(mode.name)
+        logger_string = f'eDRX configured with mode {mode.name}'
         command = f'AT+CEDRXS={mode.value}'
         if access_technology is not None:
-            logger_string += ', access technology {}'.format(access_technology.name)
+            logger_string += f', access technology {access_technology.name}'
             command += f',{access_technology.value}'
-        if requested_eDRX_cycle is not None:
-            logger_string += ', requested eDRX cycle {}'.format(requested_eDRX_cycle.name)
-            command += f',{requested_eDRX_cycle.value}'
-        if requested_PTW is not None:
-            logger_string += ' and requested PTW {}'.format(requested_PTW.name)
-            command += f',{requested_PTW.value}'
+        if requested_edrx_cycle is not None:
+            logger_string += f', requested eDRX cycle {requested_edrx_cycle.name}'
+            command += f',{requested_edrx_cycle.value}'
+        if requested_ptw is not None:
+            logger_string += f' and requested PTW {requested_ptw.name}'
+            command += f',{requested_ptw.value}'
         self.send_command(command, expected_reply=False)
         logger.info(logger_string)
 
-    def at_set_psm_mode(self, mode:PSMMode, periodic_tau:PSMPeriodicTau=None, active_time:PSMActiveTime=None):
+    def at_set_psm_mode(self, mode:PSMMode, periodic_tau:PSMPeriodicTau=None,
+                         active_time:PSMActiveTime=None):
         """
         Sets the Power Saving Mode (PSM) for the module.
 
@@ -1000,8 +1001,9 @@ class SaraR5Module:
         """
 
         if mode != SaraR5Module.PSMMode.DISABLED and not all([periodic_tau, active_time]):
-            raise ValueError('Periodic Tau and Active Time must be provided for PSM mode other than DISABLED')
-        
+            raise ValueError('Periodic Tau and Active Time must be provided for'
+                             'PSM mode other than DISABLED')
+
         command = f'AT+CPSMS={mode.value}'
         logger_str = f'PSM Mode set to {mode.name}'
         if periodic_tau is not None:
@@ -1018,7 +1020,7 @@ class SaraR5Module:
         logger.info('LWM2M activation set to %s', 'enabled' if enabled else 'disabled')
 
 # URC configuration
-        
+
     def at_set_power_saving_mode_urc(self, enabled:bool):
         """
         Enables or disables the +UUPSMR URC that conveys information on the 
@@ -1052,7 +1054,7 @@ class SaraR5Module:
         logger.info('Signalling connection URC set to %s', config.name)
 
 # Filesystem
-        
+
     def at_upload_to_filesystem(self, filename, length, data):
         """
         Uploads a data to the filesystem of the SaraR5 module.
@@ -1337,7 +1339,7 @@ class SaraR5Module:
             raise e
         finally:
 
-            debug_str = ['{}: {}'.format(timestamp.strftime("%Y-%m-%d_%H-%M-%S"),response) 
+            debug_str = [f'{timestamp.strftime("%Y-%m-%d_%H-%M-%S")}: {response}'
                          for timestamp, response in debug_log]
             debug_output = '\n          '.join(debug_str)
             logger.debug('Received:%s          %s', chr(10), debug_output)
@@ -1345,14 +1347,14 @@ class SaraR5Module:
         if multiline_reply:
             return multiline_result
         return result
-    
+
     def _read_serial_and_log(self):
         data = self._serial.readline()
         if len(data) > 0:
             timestamp_str = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S-%f")
             self.receive_log.write(f'{timestamp_str};{data}\n')
         return data
-    
+
     def _write_serial_and_log(self,data):
         self._serial.write(data)
         timestamp_str = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S-%f")
@@ -1542,20 +1544,21 @@ class SaraR5Module:
         data = data.rstrip('\r\n').split(",")
         signalling_cs_status = bool(int(data[0]))
         if signalling_cs_status != self.signalling_cx_status:
-            logger.info('MODULE: Signalling connection status changed from %s to %s', 
+            logger.info('MODULE: Signalling connection status changed from %s to %s',
                         self.signalling_cx_status, signalling_cs_status)
         self.signalling_cx_status = signalling_cs_status
         #TODO: parse state and access
-            
+
     def handle_uupsmr(self, data):
         data = data.rstrip('\r\n').split(",")
         psm_state = SaraR5Module.PSMState(int(data[0]))
         if psm_state != self.psm_state:
-            logger.info('MODULE: PSM status changed from %s to %s', self.psm_state.name, psm_state.name)
+            logger.info('MODULE: PSM status changed from %s to %s',
+                        self.psm_state.name, psm_state.name)
         self.psm_state = psm_state
 
 # Misc
-         
+
     def at_store_current_configuration(self, profile_id:int=0):
         """
         Stores the current configuration to the specified profile ID in
