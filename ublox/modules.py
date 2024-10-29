@@ -35,8 +35,12 @@ import time
 import serial
 import validators
 
-from ublox.http import HTTPClient, SecurityProfile
+
+from ublox.http import HTTPClient
+from ublox.mqtt import MQTTClient
+from ublox.security_profile import SecurityProfile
 from ublox.utils import PSMActiveTime, PSMPeriodicTau, EDRXMode, EDRXCycle,EDRXAccessTechnology
+from ublox.power_control import PowerControl
 #from ublox.socket import UDPSocket
 
 logger = logging.getLogger(__name__)
@@ -332,38 +336,39 @@ class SaraR5Module:
         PARTIAL_PSM_CLIENT_BLOCKING = 3
 
     def __init__(self, serial_port: str, baudrate=115200, rtscts=False,
-                 roaming=False, echo=True,
-                 power_toggle: Callable[[], None] = None):
-
-        self.power_toggle = power_toggle if power_toggle \
-            else lambda: (_ for _ in ()).throw(
-                NotImplementedError("Power toggle function needs to be configured"))
+                 roaming=False, echo=True, power_control: type = PowerControl):
 
         self._serial_port = serial_port
         self._serial = serial.Serial(self._serial_port, baudrate=baudrate,
                                      rtscts=rtscts,bytesize=8,parity='N',
                                      stopbits=1,timeout=5)
+        self.power_control:PowerControl = power_control()
         self.echo = echo
         self.psm_state = SaraR5Module.PSMState.PSM_INACTIVE
 
         self.terminate = False
         self.queue = queue.Queue()
-        self.lock = threading.Lock()
-        self.read_thread = threading.Thread(target=self._read_from_device)
-        self.read_thread.daemon = True
+        self.read_uart_thread = threading.Thread(target=self._read_from_uart)
+        self.read_uart_thread.daemon = True
+        # self.read_vin_thread = threading.Thread(target=self._read_vin_loop)
+        # self.read_vin_thread.daemon = True
+                                            
 
+        self.imei = None
+        self.iccid = None
         self.psd = {}
         self.signalling_cx_status = False
         self.registration_status = SaraR5Module.EPSNetRegistrationStatus.NOT_REGISTERED
+        self.registration_status_config:SaraR5Module.EPSNetRegistrationReportConfig = None
         self.roaming = roaming
         self.ip = None
-        self.imei = None
+
         self.current_rat = None
 
         self.sockets = {}
         self.http_profiles = {}
         self.security_profiles = {}
-        self.available_messages = []
+        self.mqtt_client = MQTTClient(self)
 
         self.radio_status = None
         self.radio_stats = None
@@ -375,6 +380,7 @@ class SaraR5Module:
             "+UUHTTPCR": partial(HTTPClient.handle_uuhttpcr, self),
             "+CSCON": self.handle_cscon,
             "+UUPSMR": self.handle_uupsmr,
+            "+UUMQTTC": self.mqtt_client.handle_uumqttc
             #"+CGPADDR": self.handle_cgpaddr,
         }
 
@@ -387,27 +393,49 @@ class SaraR5Module:
         self.receive_log = open(receive_log_name, 'a',encoding='utf-8')
         self.send_log = open(send_log_name, 'a', encoding='utf-8')
 
-        self.read_thread.start()
+        # self.read_vin_thread.start()
+        self.read_uart_thread.start()
 
-    def serial_init(self, retry_threshold=5):
+    def serial_init(self, clean=False, retry_threshold=5):
         """
         Initializes the serial communication with the module.
 
         Args:
             retry_threshold (int, optional): The maximum number of retries. Defaults to 5.
-        
+            clean (bool, optional): If True, a full module power down is first performed. Defaults to False.
+            
         Raises:
             Exception: If the module does not respond.
         """
-        logger.info('Initializing module')
-        #TODO: update this for when we have VIN available
+        logger.info('Initializing module (clean=%s)', clean)
+
         responding = None
         power_cycles_count = 0
+        hard_reset_count = 0
+
+        if clean:
+            logger.info("Powering OFF the module")
+            success = False
+            while not success:
+                self.power_control.force_power_off_alt()
+                success = self.power_control.await_power_state(False, timeout=30)
+                if not success: logger.warning("Power OFF failed, retrying")
+                time.sleep(1)  # wait before retrying
 
         while True:
-            for _ in range(3):
+            logger.info("Powering ON the module")
+            success = False
+            while not success:
+                self.power_control.power_on_wake()
+                success = self.power_control.await_power_state(True, timeout=30)
+                if not success: logger.warning("Power ON failed, retrying")
+                time.sleep(1)  # wait before retrying
+
+            time.sleep(3)  # wait for boot
+            self._reset_input_buffer()  # remove noise from any preceding power cycles
+
+            for _ in range(7):
                 try:
-                    self._reset_input_buffer() #remove noise from any preceding power cycles
                     self.send_command("AT", expected_reply=False, timeout=0.2)
                     responding = True
                     break
@@ -418,14 +446,24 @@ class SaraR5Module:
             if responding:
                 break
 
-            logger.info("toggling module power")
-            self.power_toggle()
-            power_cycles_count += 1
-            #time.sleep(2) # wait for boot
-
-            if power_cycles_count > retry_threshold:
-                raise ModuleNotRespondingError("Module not responding")
-            logger.info('retrying init attempt #%s', power_cycles_count)
+            # if not responding, try hard resets until retry_thredhold then try power cycles until retry_threshold
+            
+            if hard_reset_count < -1: # TODO replace with 'retry_threshold' once reset is fixed
+                logger.info("Hard Resetting the module, attempt #%s of %s", hard_reset_count, retry_threshold)
+                self.hard_reset() 
+                hard_reset_count += 1
+                time.sleep(1) 
+            elif power_cycles_count < retry_threshold:
+                logger.info("Powering OFF the module (30 second process), attempt #%s of %s", power_cycles_count, retry_threshold)
+                success = False
+                while not success:
+                    self.power_control.force_power_off_alt()
+                    success = self.power_control.await_power_state(False, timeout=30)
+                    if not success: logger.warning("Power OFF failed, retrying")
+                    time.sleep(1)  # wait before retrying
+                power_cycles_count += 1
+            else:
+                raise ModuleNotRespondingError("Module not responding, tried %s hard resets and %s power cycles" % (hard_reset_count, power_cycles_count))
 
     def setup(self, mno_profile, apn, power_saving_mode=False, tau:PSMPeriodicTau=None, 
               active_time:PSMActiveTime=None):
@@ -452,6 +490,7 @@ class SaraR5Module:
             self.at_set_lwm2m_activation(False)
 
         self.at_set_mno_profile(mno_profile)
+        self._await_iccid()
         self.at_set_pdp_context(cid_profile_id, SaraR5Module.PDPType.IPV4, apn)
         self.at_set_module_functionality(SaraR5Module.ModuleFunctionality.FULL_FUNCTIONALITY)
         self.at_set_eps_network_reg_status(
@@ -480,18 +519,20 @@ class SaraR5Module:
         Closes the module.
 
         This method terminates the read thread, closes the serial connection,
-        and sets the `terminate` flag to True.
+        closes the GPIO, and sets the `terminate` flag to True.
 
         """
         logger.info('Closing module')
         self.terminate = True
-        self.read_thread.join()
+        self.read_uart_thread.join()
         logger.debug('joined receive thread')
         self.receive_log.close()
         self.send_log.close()
         logger.debug('closed logs')
         self._serial.close()
         logger.debug('closed serial')
+        self.power_control.close()
+        logger.debug('closed power control')
 
 # Client profile management
 
@@ -634,24 +675,53 @@ class SaraR5Module:
         logging.info('Awaiting Connection')
         start_time = time.time()
         while True:
-            time.sleep(polling_interval)
 
             self.at_get_eps_network_reg_status() #triggers URC
-
-            if self.registration_status == SaraR5Module.EPSNetRegistrationStatus.NOT_REGISTERED:
-                continue
-
-            if roaming and self.registration_status == \
-            SaraR5Module.EPSNetRegistrationStatus.REGISTERED_AND_ROAMING:
-                break
 
             if (not roaming) and self.registration_status == \
                 SaraR5Module.EPSNetRegistrationStatus.REGISTERED_HOME_NET:
                 break
 
+            if roaming and self.registration_status == \
+            SaraR5Module.EPSNetRegistrationStatus.REGISTERED_AND_ROAMING:
+                break
+
             elapsed_time = time.time() - start_time
             if elapsed_time > timeout:
                 raise ConnectionTimeoutError(f'Could not connect in {timeout} seconds')
+            
+            time.sleep(polling_interval)
+
+    def _await_iccid(self, polling_interval=2, timeout=180):
+        """
+        Continuously poll the ICCID and see if it has been retrieved.
+
+        Args:
+            polling_interval (int, optional): The interval in seconds between each poll.
+                Defaults to 2s.
+            timeout (int, optional): Timeout value in seconds. Defaults to 180.
+
+        Raises:
+            ConnectionTimeoutError: Raised if the ICCID could not be 
+                retrieved within the specified timeout.
+
+        """
+        logging.info('Awaiting ICCID')
+        start_time = time.time()
+        while True:
+            try:
+                self.at_read_sim_iccid()
+            except CMEError as e:
+                logger.warning(e)
+
+            if self.iccid:
+                break
+
+            elapsed_time = time.time() - start_time
+            if elapsed_time > timeout:
+                raise ConnectionTimeoutError(f'Could not retrieve ICCID in {timeout} seconds')
+            
+            time.sleep(polling_interval)
 
 # Serial control
 
@@ -685,6 +755,13 @@ class SaraR5Module:
         self.send_command(f'AT+UDCONF=1,{mode}', expected_reply=False)
         logger.info('%s set to %s', mode.name, mode.value)
 
+# Identifiers, hardware info / status
+
+    def at_read_sim_iccid(self):
+        result = self.send_command('AT+CCID?')
+        self.iccid = int(result[0])
+        return self.iccid
+
     def at_read_imei(self):
         """
         Reads the International Mobile Equipment Identity (IMEI) number.
@@ -695,6 +772,7 @@ class SaraR5Module:
         result = self.send_command('AT+CGSN=1')
         self.imei = int(result[0])
         return self.imei
+
 
 # Networking / radio config
 
@@ -750,6 +828,7 @@ class SaraR5Module:
             config (EPSNetworkRegistrationReportConfig): The configuration value to set.
         """
         self.send_command(f'AT+CEREG={config.value}', expected_reply=False)
+        self.registration_status_config=config
         logger.info('%s set to %s', config.name, config.value)
 
     def at_set_module_functionality(self, function: ModuleFunctionality, reset: bool = None):
@@ -1003,6 +1082,9 @@ class SaraR5Module:
         if mode != SaraR5Module.PSMMode.DISABLED and not all([periodic_tau, active_time]):
             raise ValueError('Periodic Tau and Active Time must be provided for'
                              'PSM mode other than DISABLED')
+        
+        if mode == SaraR5Module.PSMMode.DISABLED and any([periodic_tau, active_time]):
+            raise ValueError('Periodic Tau and Active Time must not be provided when PSM mode is DISABLED')
 
         command = f'AT+CPSMS={mode.value}'
         logger_str = f'PSM Mode set to {mode.name}'
@@ -1286,7 +1368,7 @@ class SaraR5Module:
         multiline_result = []
 
         if expected_reply is True:
-            expected_reply_bytes = command.lstrip("AT").split("=")[0].encode() + b":"
+            expected_reply_bytes = command.lstrip("AT").split("=")[0].split("?")[0].encode() + b":"
         if expected_reply is False:
             got_reply=True
         if isinstance(expected_reply,str):
@@ -1302,9 +1384,10 @@ class SaraR5Module:
 
         timeout_time = time.time() + timeout
         try:
-            while not (got_ok and got_reply):
+            while not (got_ok and got_reply and input_data is None):
                 time_remaining = timeout_time - time.time()
                 if time_remaining <= 0:
+                    logger.error(f"Timeout waiting for response to '{command}'. State: got_ok={got_ok}, got_reply={got_reply}, input_data={input_data}")
                     raise ATTimeoutError("Timeout waiting for response")
                 try:
                     response, timestamp_read = self.queue.get(timeout=time_remaining)
@@ -1330,6 +1413,7 @@ class SaraR5Module:
                 elif input_data and len(input_data) > 0 and response.startswith(b">"):
                     # raw data input prompt
                     self._write_serial_and_log(input_data)
+                    input_data = None
                 elif all([multiline_reply,expected_reply,got_reply]) and not got_ok:
                     # a line in multiline reply
                     multiline_result.append(response)
@@ -1360,7 +1444,7 @@ class SaraR5Module:
         timestamp_str = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S-%f")
         self.send_log.write(f'{timestamp_str};{data}\n')
 
-    def _read_from_device(self):
+    def _read_from_uart(self):
         """
         Reads data from the device and processes it.
 
@@ -1378,6 +1462,7 @@ class SaraR5Module:
             None
         """
 
+        
         linefeed = b'\r\n'
         linefeed_buffered = False
         linefeed_timestamp = None
@@ -1406,7 +1491,10 @@ class SaraR5Module:
                 raise e
             if any(data_decoded.startswith(prefix) for prefix in self.urc_mappings):
                 if not linefeed_buffered:
-                    raise ValueError('URC received before linefeed')
+                    #raise ValueError('URC received before linefeed')
+                    logger.warning('URC received before linefeed. Can occur on first init of module')
+                    linefeed_buffered = True
+                    linefeed_timestamp = timestamp
                 urc = data.split(b":")[0].decode()
                 urc_data = data.split(b":")[1].decode()
                 linefeed_timestamp_str = linefeed_timestamp.strftime("%Y-%m-%d_%H-%M-%S")
@@ -1490,15 +1578,25 @@ class SaraR5Module:
         data = data.rstrip('\r\n').split(",")
         mode = None
 
-        if int(data[0]) not in [0,1]:
+
+        if len(data) == 1:
+            mode = "URC" # if there's only one parameter it's a URC because min 2 
+                         # parameters in a read response
+        elif self.registration_status_config == SaraR5Module.EPSNetRegistrationReportConfig.DISABLED:
+            mode = "Read" # no URC if it's disabled
+        elif int(data[0]) != self.registration_status_config.value:
+            mode = "URC" # if 1st parameter doesn't match config it's a URC
+        elif self.registration_status_config == SaraR5Module.EPSNetRegistrationReportConfig.ENABLED:
+            mode = "Read" # if 1st parameter matches config and is 1, since there's at least 2 params
+                          # it's a read
+        elif int(data[0]) != SaraR5Module.EPSNetRegistrationStatus.REGISTERED_AND_ROAMING:
             mode = "Read"
-        elif len(data) > 2:
-            mode = "URC"
-        elif len(data) == 2:
-            mode = "Read"
+                # for any status other than 1 or 5, no other params should be present
+                          # if there's 2+ params and the first one is a 2, 3, or 4 this is a read    
         else:
-            assert len(data) == 1
-            mode = "URC"
+            raise NotImplementedError("roaming and/or n=5 not yet supported") 
+
+
 
         read_parameters=["mode","registration_status","tracking_area_code","cell_id",
                             "access_tech","reject_cause_type","assigned_active_time",
@@ -1556,6 +1654,7 @@ class SaraR5Module:
             logger.info('MODULE: PSM status changed from %s to %s',
                         self.psm_state.name, psm_state.name)
         self.psm_state = psm_state
+
 
 # Misc
 
