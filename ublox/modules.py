@@ -62,6 +62,141 @@ class ConnectionTimeoutError(ATTimeoutError):
 class ModuleNotRespondingError(Exception):
     """Module did not respond"""
 
+class AT_Command_Handler():
+
+    def __init__(self, response_queue, output_fn):
+        self.response_queue = response_queue
+        self.output_fn = output_fn
+    
+    def send_cmd(self, command:str, input_data:bytes=None, expected_reply=True, expected_multiline_reply=False, timeout=10):
+        
+        """
+        Sends a command to the module and waits for a response.
+
+        Args:
+            command (str): The command to send to the module.
+            input_data (bytes, optional): Additional data to send after receiving a ">" prompt.
+                Defaults to None.
+            expected_reply (bool or str, optional): The expected reply from the module.
+                - If True, expects a reply with a prefix matching the command.
+                - If False, no reply is expected.
+                - If a string, expects a reply with the specified prefix.
+                Defaults to True.
+            expected_multiline_reply (bool, optional): Specifies whether a multiline reply is expected.
+                Only applicable if expected_reply is True or a string. Defaults to False.
+
+            timeout (int, optional): The maximum time to wait for a response, in seconds.
+                Defaults to 10.
+
+        Returns:
+            list or None: The response from the module, split into a list if 
+                it's a single-line reply. Returns None if no response is expected.
+
+        Raises:
+            TypeError: If expected_reply is not of type bool or str.
+            ValueError: If multiline_reply is True and expected_reply is False.
+            ATTimeoutError: If a response is not received within the specified timeout.
+            ATError: If the module returns an "ERROR" response.
+            CMEError: If the module returns a "+CME ERROR" response.
+
+        """
+
+        self.command_str = command
+        self.input_data = input_data
+        self.expected_reply = expected_reply
+        self.expected_multiline_reply = expected_multiline_reply
+        self._validate()
+        self._prepare_expected_reply()
+
+        self.output_fn(self._command_bytes(terminated=True))
+        timestamp_write = datetime.datetime.now()
+        timestamp_write_str = timestamp_write.strftime("%Y-%m-%d_%H-%M-%S")
+        logger.debug('Sent:%s          %s: %s', chr(10), timestamp_write_str, self._command_bytes(terminated=True))
+
+        self.got_reply = True if not self.expected_reply_bytes else False
+        self.got_ok = False
+        self.result, self.multiline_result = None, []
+        self.debug_log = []
+        self.timeout_time = time.time() + timeout
+
+        try:
+            while not time.time() > self.timeout_time:
+                if self.got_ok and self.got_reply and self.input_data is None:
+                    break
+                response = self._get_response()
+                self._process_response(response)
+                if input_data and response.startswith(b">"):
+                    self.output_fn(self.input_data)
+                    self.input_data = None
+            else:   
+                logger.error(f"Timeout waiting for response to '{self.command_str}'. State: got_ok={self.got_ok}, got_reply={self.got_reply}, input_data={self.input_data}")
+                raise ATTimeoutError("Timeout waiting for response")
+        except Exception as e:
+            raise e
+        finally:
+            self._log_debug_info()
+
+        return self.multiline_result if self.expected_multiline_reply else self.result
+
+    
+    def _validate(self):
+        if not isinstance(self.expected_reply, (bool, str)):
+            raise TypeError("expected_reply is not of type bool or str")
+        if self.expected_multiline_reply and not self.expected_reply:
+            raise ValueError("multiline_reply cannot be True if expected_reply is False")
+
+    def _command_bytes(self, terminated=True):
+        command_bytes_unterminated = self.command_str.encode().rstrip(b"\r\n")
+        result =  command_bytes_unterminated + b"\r\n" if terminated else command_bytes_unterminated
+        return result
+
+    def _prepare_expected_reply(self):
+        if self.expected_reply is True:
+            expected_reply_bytes = self.command_str.lstrip("AT").split("=")[0].split("?")[0].encode() + b":"
+        elif self.expected_reply is False:
+            expected_reply_bytes = None
+        elif isinstance(self.expected_reply, str):
+            expected_reply_bytes = b"+" + self.expected_reply.encode() + b":"
+        self.expected_reply_bytes=expected_reply_bytes
+    
+    def _get_response(self):
+        time_remaining = self.timeout_time - time.time()
+        try:
+            response, timestamp_read = self.response_queue.get(timeout=time_remaining)
+            self.debug_log.append((timestamp_read, response))
+            return response
+        except queue.Empty:
+            return None
+        
+    def _process_response(self, response):
+        if response is None:
+            return
+        if response.startswith(b"OK"):
+            self.got_ok = True
+        elif self.expected_reply_bytes and response.startswith(self.expected_reply_bytes):
+            self.got_reply = True
+            self.result = response.lstrip(self.expected_reply_bytes).rstrip(b"\r\n").decode().strip().split(",")
+            self.multiline_result.append(response)
+        elif response.startswith(b"ERROR"):
+            raise ATError
+        elif response.startswith(b"+CME ERROR:"):
+            code = response.lstrip(b"+CME ERROR:").rstrip(b"\r\n").decode()
+            #TODO: convert code to error message
+            raise CMEError(code)
+        elif response == b"\r\n" or response.startswith(self._command_bytes(terminated=False)):
+            pass
+        elif self.input_data and response.startswith(b">"):
+            # raw data input prompt, handled elsewhere
+            pass
+        elif self.expected_multiline_reply and self.expected_reply_bytes and self.got_reply:
+            self.multiline_result.append(response)
+        else:
+            logger.warning('got unexpected %s', response)
+
+    def _log_debug_info(self):
+        debug_str = [f'{timestamp.strftime("%Y-%m-%d_%H-%M-%S")}: {response}' for timestamp, response in self.debug_log]
+        debug_output = '\n          '.join(debug_str)
+        logger.debug('Received:%s          %s', chr(10), debug_output)
 
 class SaraR5Module:
     """
@@ -343,11 +478,13 @@ class SaraR5Module:
                                      rtscts=rtscts,bytesize=8,parity='N',
                                      stopbits=1,timeout=5)
         self.power_control:PowerControl = power_control()
+        self.serial_read_queue = queue.Queue()
+        self.at_cmd_handler = AT_Command_Handler(self.serial_read_queue, self._write_serial_and_log)
         self.echo = echo
         self.psm_state = SaraR5Module.PSMState.PSM_INACTIVE
 
         self.terminate = False
-        self.queue = queue.Queue()
+
         self.read_uart_thread = threading.Thread(target=self._read_from_uart)
         self.read_uart_thread.daemon = True
         # self.read_vin_thread = threading.Thread(target=self._read_vin_loop)
@@ -627,25 +764,6 @@ class SaraR5Module:
             length = len(data)
             self.at_upload_to_filesystem(filename_out, length, data)
 
-    def toggle_power(self, at_test=True):
-        """
-        Toggles the power state of the module.
-
-        Args:
-            at_test (bool): Flag indicating whether to test the AT command 
-                response after toggling the power. Default is True.
-        """
-        #TODO: read current power state from VIN
-        self.power_toggle()
-        #TODO: _await_vin() to check if power has been toggled
-        #TODO: if power is on, wait for AT command reply
-        #loop until AT returns OK
-        while at_test:
-            try:
-                self.send_command('AT',expected_reply=False,timeout=1)
-                break
-            except ATTimeoutError:
-                continue
 
     def update_radio_statistics(self):
         """
@@ -1324,22 +1442,22 @@ class SaraR5Module:
 
 #AT Command Handling
 
-    def send_command(self, command:str, expected_reply=True, multiline_reply=False,
-                       input_data:bytes=None, timeout=10):
+    def send_command(self, command:str, input_data:bytes=None, expected_reply=True, expected_multiline_reply=False, timeout=10):
         """
         Sends a command to the module and waits for a response.
 
         Args:
             command (str): The command to send to the module.
+            input_data (bytes, optional): Additional data to send after receiving a ">" prompt.
+                Defaults to None.
             expected_reply (bool or str, optional): The expected reply from the module.
                 - If True, expects a reply with a prefix matching the command.
                 - If False, no reply is expected.
                 - If a string, expects a reply with the specified prefix.
                 Defaults to True.
-            multiline_reply (bool, optional): Specifies whether a multiline reply is expected.
+            expected_multiline_reply (bool, optional): Specifies whether a multiline reply is expected.
                 Only applicable if expected_reply is True or a string. Defaults to False.
-            input_data (bytes, optional): Additional data to send after receiving a ">" prompt.
-                Defaults to None.
+
             timeout (int, optional): The maximum time to wait for a response, in seconds.
                 Defaults to 10.
 
@@ -1355,82 +1473,7 @@ class SaraR5Module:
             CMEError: If the module returns a "+CME ERROR" response.
 
         """
-
-        if not isinstance(expected_reply, (bool, str)):
-            raise TypeError("expected_reply is not of type bool or str")
-        if multiline_reply and not expected_reply:
-            raise ValueError("multiline_reply cannot be True if expected_reply is False")
-
-        result = None
-        got_ok = False
-        got_reply = False
-        debug_log = []
-        multiline_result = []
-
-        if expected_reply is True:
-            expected_reply_bytes = command.lstrip("AT").split("=")[0].split("?")[0].encode() + b":"
-        if expected_reply is False:
-            got_reply=True
-        if isinstance(expected_reply,str):
-            expected_reply_bytes = b"+" + expected_reply.encode() + b":"
-
-        command_unterminated = command.encode().rstrip(b"\r\n")
-        command = command_unterminated + b"\r\n"
-
-        self._write_serial_and_log(command)
-        timestamp_write = datetime.datetime.now()
-        timestamp_write_str = timestamp_write.strftime("%Y-%m-%d_%H-%M-%S")
-        logger.debug('Sent:%s          %s: %s', chr(10), timestamp_write_str, command)
-
-        timeout_time = time.time() + timeout
-        try:
-            while not (got_ok and got_reply and input_data is None):
-                time_remaining = timeout_time - time.time()
-                if time_remaining <= 0:
-                    logger.error(f"Timeout waiting for response to '{command}'. State: got_ok={got_ok}, got_reply={got_reply}, input_data={input_data}")
-                    raise ATTimeoutError("Timeout waiting for response")
-                try:
-                    response, timestamp_read = self.queue.get(timeout=time_remaining)
-                    debug_log.append((timestamp_read, response))
-                except queue.Empty:
-                    continue
-
-                if response.startswith(b"OK"):
-                    got_ok = True
-                elif expected_reply is not False and response.startswith(expected_reply_bytes):
-                    # we have expected reply to a command
-                    got_reply = True
-                    result = response.lstrip(expected_reply_bytes) \
-                        .rstrip(b"\r\n").decode().strip().split(",")
-                    multiline_result.append(response)
-                elif response.startswith(b"ERROR"):
-                    raise ATError
-                elif response.startswith(b"+CME ERROR:"):
-                    code = response.lstrip(b"+CME ERROR:").rstrip(b"\r\n").decode()
-                    raise CMEError(code) #TODO: convert code to error message
-                elif response == b"\r\n" or response.startswith(command_unterminated): # ack or echo
-                    pass
-                elif input_data and len(input_data) > 0 and response.startswith(b">"):
-                    # raw data input prompt
-                    self._write_serial_and_log(input_data)
-                    input_data = None
-                elif all([multiline_reply,expected_reply,got_reply]) and not got_ok:
-                    # a line in multiline reply
-                    multiline_result.append(response)
-                else:
-                    logger.warning('WARNING: got unexpected %s', response)
-        except Exception as e:
-            raise e
-        finally:
-
-            debug_str = [f'{timestamp.strftime("%Y-%m-%d_%H-%M-%S")}: {response}'
-                         for timestamp, response in debug_log]
-            debug_output = '\n          '.join(debug_str)
-            logger.debug('Received:%s          %s', chr(10), debug_output)
-
-        if multiline_reply:
-            return multiline_result
-        return result
+        return self.at_cmd_handler.send_cmd(command, input_data, expected_reply, expected_multiline_reply, timeout)
 
     def _read_serial_and_log(self):
         data = self._serial.readline()
@@ -1510,26 +1553,26 @@ class SaraR5Module:
             #OK, ERROR, command response, or other case
             if linefeed_buffered:
                 data_with_timestamp = (linefeed, linefeed_timestamp)
-                self.queue.put(data_with_timestamp)
+                self.serial_read_queue.put(data_with_timestamp)
                 linefeed_buffered = False
                 data_with_timestamp = (data, timestamp)
-                self.queue.put(data_with_timestamp)
+                self.serial_read_queue.put(data_with_timestamp)
                 continue
 
             #multiline reply case, no linefeed
             data_with_timestamp = (data, timestamp)
-            self.queue.put(data_with_timestamp)
+            self.serial_read_queue.put(data_with_timestamp)
 
     def _reset_input_buffer(self):
         """
         Clears the input buffer by removing all pending items from the queue.
         """
-        while not self.queue.empty():
+        while not self.serial_read_queue.empty():
             try:
-                self.queue.get_nowait()
+                self.serial_read_queue.get_nowait()
             except queue.Empty:
                 continue
-            self.queue.task_done()
+            self.serial_read_queue.task_done()
 
 #URC handlers
 
