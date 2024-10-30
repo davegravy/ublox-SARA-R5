@@ -173,7 +173,7 @@ module = SaraR5Module(serial_port='/dev/ttyS1', echo=False, power_control=AT91Po
 apn = "ciot"
 mno_profile = SaraR5Module.MobileNetworkOperator.ROGERS
 #low power mode
-lpm = False
+lpm = True
 
 # module.setup(radio_mode='LTEM')
 # module.connect(operator=302720, apn="ciot")
@@ -185,6 +185,7 @@ try:
         module.setup(mno_profile, apn, power_saving_mode=True, tau=PSMPeriodicTau._4_hrs_30_mins, active_time=PSMActiveTime._14_secs)
     else:
         module.setup(mno_profile, apn, power_saving_mode=False)
+
     
     result = module.send_command(f'AT+CSQ',expected_reply=True)
     
@@ -210,7 +211,7 @@ try:
 
     if lpm: 
         module.at_set_power_saving_uart_mode(SaraR5Module.PowerSavingUARTMode.ENABLED,
-                                        timeout=1000) #TODO: investigate idle optimization
+                                        timeout=40) #TODO: investigate idle optimization
         
     time.sleep(80)
     #TODO: investigate CEPPI (power saving preference)
@@ -259,13 +260,13 @@ try:
         retry_command(mqtt.publish_file, max_retries, retry_delay, topic=topic, send_filename=send_filename, qos=1) 
         retry_command(mqtt.disconnect, max_retries, retry_delay)
         if lpm: module.at_set_power_saving_uart_mode(SaraR5Module.PowerSavingUARTMode.ENABLED,
-                                            timeout=1000)
+                                            timeout=40)
 
         # logger.info("-------------- starting Sentry post")
         # result = sentry_profile.post('/root/sentry-body.txt', content_type=HTTPClient.ContentType.APPLICATION_JSON, server_path=f'/api/{SENTRY_PROJECT_NUMBER}/envelope/')
         # print(result)
         logger.info("starting sleep")
-        time.sleep(300)
+        time.sleep(540)
         logger.info("finished sleep")
 except Exception as e:
     print("test.py exception handling")
