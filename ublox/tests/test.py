@@ -266,7 +266,7 @@ try:
         # result = sentry_profile.post('/root/sentry-body.txt', content_type=HTTPClient.ContentType.APPLICATION_JSON, server_path=f'/api/{SENTRY_PROJECT_NUMBER}/envelope/')
         # print(result)
         logger.info("starting sleep")
-        time.sleep(300)
+        time.sleep(540)
         logger.info("finished sleep")
 except Exception as e:
     print("test.py exception handling")
