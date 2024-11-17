@@ -5,8 +5,6 @@ import os
 import logging
 from abc import ABC, abstractmethod
 
-logger = logging.getLogger(__name__)
-
 class PowerControl(ABC):
     """
     An abstract base class for controlling power states of modules.
@@ -25,7 +23,7 @@ class PowerControl(ABC):
     """
 
     @abstractmethod
-    def __init__(self):
+    def __init__(self, logger=None):
         pass
 
     @abstractmethod
@@ -81,7 +79,11 @@ class AT91PowerControl(PowerControl):
         _config_gpio_bias(): Configures the GPIO bias settings.
     """
 
-    def __init__(self):
+    def __init__(self, logger=None):
+        self.logger = logger or logging.getLogger(__name__)
+        if logger is None:
+            self.logger.setLevel(logging.DEBUG)
+            self.logger.addHandler(logging.StreamHandler())
         # 128 gpio in gpiochip0
         # 0 ~ 31 PA0 -> PA31
         # 32 ~ 63 PB0 -> PB31
@@ -89,12 +91,12 @@ class AT91PowerControl(PowerControl):
         # 96 ~ 127 PD0 -> PD31
 
         #NOTE setting mode on outputs may cause flicker of the power state
-        logger.info("Initializing PowerControl")
+        self.logger.info("Initializing PowerControl")
 
         self._config_gpio_bias()
         self.gpio_v_int = GPIO(87, GPIO.IN)
         vint_initial = self.gpio_v_int.get()
-        self.gpio_reset_n = GPIO(85, GPIO.OUT,initial=vint_initial) #TODO invert for next hw rev
+        self.gpio_reset_n = GPIO(85, GPIO.OUT,initial=False)
         self.gpio_pwr_on = GPIO(89, GPIO.OUT,initial=False)
 
     def get_power_state(self):
@@ -107,7 +109,7 @@ class AT91PowerControl(PowerControl):
         return self.gpio_v_int.get()
 
     def await_power_state(self, target_state, timeout=30):
-        logger.debug(f"Awaiting power state. target_state: {target_state} timeout: {timeout}")
+        self.logger.debug(f"Awaiting power state. target_state: {target_state} timeout: {timeout}")
         if self.get_power_state() == target_state:
             return True
         #burn one to clear past edges
@@ -116,7 +118,7 @@ class AT91PowerControl(PowerControl):
         success = GPIO.RISING if target_state else GPIO.FALLING
         if result == success:
             current_state = self.get_power_state()
-            logger.debug(f"current state: {current_state}, target_state: {target_state}")
+            self.logger.debug(f"current state: {current_state}, target_state: {target_state}")
             return current_state == target_state
 
     def power_on_wake(self):
@@ -128,11 +130,10 @@ class AT91PowerControl(PowerControl):
         power_state = self.get_power_state()
 
         if power_state:
-            logger.info("Power ON/Wake requested, already on")
+            self.logger.info("Power ON/Wake requested, already on")
             return power_state
-        logger.info("Power ON/Wake requested, powering on")
+        self.logger.info("Power ON/Wake requested, powering on")
         self.gpio_pwr_on.set(True)
-        self.gpio_reset_n.set(True) #TODO remove when reset fixed
         time.sleep(2.5)
         self.gpio_pwr_on.set(False)
         time.sleep(0.25)
@@ -149,21 +150,21 @@ class AT91PowerControl(PowerControl):
         power_state = self.get_power_state()
 
         if not power_state:
-            logger.info("Force power OFF requested, already off")
+            self.logger.info("Force power OFF requested, already off")
             return True
 
-        logger.info("Force power OFF requested, powering off")
-        logger.debug("setting pwr_on to 0")
+        self.logger.info("Force power OFF requested, powering off")
+        self.logger.debug("setting pwr_on to 0")
         self.gpio_pwr_on.set(True)
         time.sleep(22.5)
-        logger.debug("setting reset_n to 0")
-        self.gpio_reset_n.set(False) #TODO invert for next hw rev
+        self.logger.debug("setting reset_n to 0")
+        self.gpio_reset_n.set(True) 
         time.sleep(1)
-        logger.debug("setting pwr_on to 1")
+        self.logger.debug("setting pwr_on to 1")
         self.gpio_pwr_on.set(False)
         time.sleep(2)
-        logger.debug("setting reset_n to 1")
-        self.gpio_reset_n.set(True)
+        self.logger.debug("setting reset_n to 1")
+        self.gpio_reset_n.set(False)
         time.sleep(0.25)
         success = self.get_power_state() == False
         return success
@@ -178,14 +179,14 @@ class AT91PowerControl(PowerControl):
         power_state = self.get_power_state()
 
         if not power_state:
-            logger.info("Force power OFF requested, already off")
+            self.logger.info("Force power OFF requested, already off")
             return True
 
-        logger.info("Force power OFF requested, powering off (ALT method)")
-        logger.debug("setting pwr_on to 0")
+        self.logger.info("Force power OFF requested, powering off (ALT method)")
+        self.logger.debug("setting pwr_on to 0")
         self.gpio_pwr_on.set(True)
         time.sleep(4.25)
-        logger.debug("setting pwr_on to 1")
+        self.logger.debug("setting pwr_on to 1")
         self.gpio_pwr_on.set(False)
         success = self.get_power_state() == False
         return success
@@ -198,13 +199,13 @@ class AT91PowerControl(PowerControl):
         """
 
         if not self.get_power_state():
-            logger.warning("Hard reset requested but power is off")
+            self.logger.warning("Hard reset requested but power is off")
             return False
 
-        logger.info("Hard reset requested, resetting")
-        self.gpio_reset_n.set(False) #TODO invert for next hw rev
+        self.logger.info("Hard reset requested, resetting")
+        self.gpio_reset_n.set(True) 
         time.sleep(0.2)
-        self.gpio_reset_n.set(True)
+        self.gpio_reset_n.set(False)
         success = self.get_power_state() == True
         return success
 
@@ -215,11 +216,11 @@ class AT91PowerControl(PowerControl):
         (gpio_v_int, gpio_reset_n, gpio_pwr_on) are properly closed to free up 
         resources and avoid potential issues with unclosed connections.
         """
-        logger.info("Closing PowerControl")
+        self.logger.info("Closing PowerControl")
         self.gpio_v_int.close()
         self.gpio_reset_n.close()
         self.gpio_pwr_on.close()
-        logger.info("PowerControl closed")
+        self.logger.info("PowerControl closed")
 
     def _config_gpio_bias(self):
         """

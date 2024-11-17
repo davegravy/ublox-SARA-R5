@@ -9,7 +9,8 @@ if TYPE_CHECKING:
     from ublox.modules import SaraR5Module
     from ublox.security_profile import SecurityProfile
 
-logger = logging.getLogger(__name__)
+class MQTTBrokerError(Exception):
+    """UMQTTER on Module"""
 
 class MQTTClient:
     """
@@ -72,6 +73,23 @@ class MQTTClient:
         self.client_id = None
         self.username = ""
         self.password = ""
+
+    def configure(self, client_id, server_params:dict, security_profile):
+        hostname = server_params.get('hostname')
+        port = server_params.get('port')
+        ssl = server_params.get('ssl')
+        if not hostname:
+            raise ValueError("hostname must be set")
+        if not client_id:
+            raise ValueError("client_id must be set")
+        if not security_profile:
+            raise ValueError("security_profile must be set")
+        
+        self.set_client_id(client_id)
+        self.set_server_params(hostname=hostname, port=port, ssl=ssl)
+        self.set_security_profile(security_profile)
+        self.apply_config()
+        self.at_set_mqtt_nonvolatile(MQTTClient.NonVolatileOption.STORE_TO_NVM)
     
     def set_security_profile(self, security_profile: 'SecurityProfile'):
         """
@@ -145,14 +163,15 @@ class MQTTClient:
             if broker_error:
                 error_code = self._command_handler.at_get_command_error()
                 #TODO lookup error code descriptions, translate to human readable
-                raise Exception(f"{error_message}: MQTT Broker Error (code: {error_code})")
+                raise MQTTBrokerError(f"{error_message}: MQTT Broker Error (code: {error_code})")
             else:
-                logger.info(f"{command_func.__name__.replace('at_', '').replace('_', ' ').capitalize()} succeeded")
+                self._module.logger.info(f"{command_func.__name__.replace('at_', '').replace('_', ' ').capitalize()} succeeded")
         except Exception as e:
-            logger.error(f"{error_message}: {str(e)}")
-            logger.error("Traceback: %s", traceback.format_exc())
+            self._module.logger.error(f"{error_message}: {str(e)}")
+            self._module.logger.error("Traceback: %s", traceback.format_exc())
             raise e
         finally:
+            self._module.logger.debug("in _execute_command finally")
             with self._command_handler.lock:
                 #in success case, command_in_progress is set to None in the URC handler
                 self._command_handler.command_in_progress = None
@@ -175,6 +194,7 @@ class MQTTClient:
             qos (QoSLevel, optional): The Quality of Service level for the message. Default is QoSLevel.AT_MOST_ONCE.
         """
         qos_level = MQTTCommandHandler.QoSLevel(qos)
+
         self._execute_command(
             self._command_handler.at_mqtt_publish,
             f"Failed to publish message to topic {topic}",
@@ -252,7 +272,7 @@ class MQTTClient:
         if not (1 <= port <= 65535):
             raise ValueError("port must be in the range 1-65535")
         self._module.send_command(f'AT+UMQTT=2,"{hostname}",{port}', expected_reply=False)
-        logger.info("Set MQTT server to %s:%d", hostname, port)
+        self._module.logger.info("Set MQTT server to %s:%d", hostname, port)
         
 
     def at_set_mqtt_ssl(self, ssl:MQTTSConfig=MQTTSConfig.DISABLED, security_profile_id:int=None):
@@ -274,10 +294,10 @@ class MQTTClient:
         at_command = f'AT+UMQTT=11,{ssl.value}'
         if isinstance(security_profile_id, int):
             at_command = at_command + f',{security_profile_id}'
-        else: print(security_profile_id)
+        else: self._module.logger.error("invalid profile id: ".format(security_profile_id))
 
         self._module.send_command(at_command, expected_reply=False)
-        logger.info("Set MQTT SSL to %s", ssl.name)
+        self._module.logger.info("Set MQTT SSL to %s", ssl.name)
 
     def at_set_mqtt_client_id(self, client_id: str):
         """
@@ -288,7 +308,7 @@ class MQTTClient:
         if len(client_id) > 256:
             raise ValueError("client_id must be 256 characters or less")
         self._module.send_command(f'AT+UMQTT=0,"{client_id}"', expected_reply=False)
-        logger.info("Set MQTT client ID to %s", self.client_id)
+        self._module.logger.info("Set MQTT client ID to %s", self.client_id)
 
     def at_set_mqtt_credentials(self, username: str, password: str):
         """
@@ -302,7 +322,7 @@ class MQTTClient:
         if len(password) > 512:
             raise ValueError("password must be 512 characters or less")
         self._module.send_command(f'AT+UMQTT=4,"{username}","{password}"', expected_reply=False)
-        logger.info("Set MQTT credentials: username=%s, password=%s", self.username, self.password)
+        self._module.logger.info("Set MQTT credentials: username=%s, password=%s", self.username, self.password)
 
     def at_set_mqtt_nonvolatile(self, option: NonVolatileOption):
         """
@@ -317,7 +337,7 @@ class MQTTClient:
         if not isinstance(option, MQTTClient.NonVolatileOption):
             raise ValueError("option must be an instance of NonVolatileOption")
         self._module.send_command(f'AT+UMQTTNV={option.value}', expected_reply=False)
-        logger.info("Set MQTT non-volatile storage option to %s", option.name)
+        self._module.logger.info("Set MQTT non-volatile storage option to %s", option.name)
 
 
 class MQTTCommandHandler:
@@ -366,7 +386,7 @@ class MQTTCommandHandler:
             None
         """
         from ublox.modules import ConnectionTimeoutError
-        logging.info('Awaiting MQTT Response')
+        self._module.logger.info('Awaiting MQTT Response')
 
         start_time = time.time()
 
@@ -472,42 +492,42 @@ class MQTTCommandHandler:
         Args:
             urc_data (str): The URC data received from the module.
         """
-        logger.debug('Received MQTT URC: %s', urc_data)
+        self._module.logger.debug('Received MQTT URC: %s', urc_data)
         parts = urc_data.split(',')
 
         try:
             command_id = int(parts[0])
             status_value = int(parts[1])
         except (IndexError, ValueError):
-            logger.error('Malformed URC data: %s', urc_data)
+            self._module.logger.error('Malformed URC data: %s', urc_data)
             return
 
         command_status = status_value == 1
         disconnect_status = status_value  # Store the actual value to differentiate
         
-        logger.debug('MQTT URC: command_id=%d, status=%d', command_id, status_value)
+        self._module.logger.debug('MQTT URC: command_id=%d, status=%d', command_id, status_value)
         with self.lock:
             if command_id == 0: #disconnect command or URC
                 if disconnect_status == 1:
                     self.connected = False
                     self.command_in_progress = None
                 elif disconnect_status in [100, 101, 102]:
-                    logger.info("MQTT connection lost, reason code: %d", disconnect_status)
+                    self._module.logger.info("MQTT connection lost, reason code: %d", disconnect_status)
                     self.connected = False
                 else:
                     self.broker_error = True
-                    logger.error("MQTT connection error, reason code: %d", disconnect_status)
+                    self._module.logger.error("MQTT connection error, reason code: %d", disconnect_status)
                     self.command_in_progress = None
             elif command_id == 1: #connect command
                 if command_status:
                         self.connected = True
                 else: 
                         self.broker_error = True
-                        logger.error("MQTT connect failed: %s", urc_data)
+                        self._module.logger.error("MQTT connect failed: %s", urc_data)
             elif command_id in [2, 3, 4, 5]: # publish, publish file, subscribe, unsubscribe commands
                 if not command_status:
                     self.broker_error = True
-                    logger.error("MQTT command %s failed: %s", self.command_in_progress, urc_data)
+                    self._module.logger.error("MQTT command %s failed: %s", self.command_in_progress, urc_data)
 
             elif command_id == 6: # message count update
                 self.message_count = int(parts[1])

@@ -7,7 +7,7 @@ class UbloxSocket:
 
     def __init__(self, socket_id, module, source_port=None):
         self.socket_id = socket_id
-        self.module = module
+        self._module = module
         self.source_port = source_port
 
         # When setting a socket to listening this is set to true.
@@ -25,13 +25,13 @@ class UbloxSocket:
         pass
 
     def close(self):
-        self.module.close_socket(self.socket_id)
+        self._module.close_socket(self.socket_id)
 
 
 class UDPSocket(UbloxSocket):
 
     def sendto(self, bytes, address):
-        self.module.send_udp_data(socket=self.socket_id, host=address[0],
+        self._module.send_udp_data(socket=self.socket_id, host=address[0],
                                   port=address[1], data=bytes.decode())
         self.able_to_receive = True
 
@@ -39,7 +39,7 @@ class UDPSocket(UbloxSocket):
         host, port = address
         # Since we can only have the ip of the module we dont care about the
         # hostvalue provided.
-        self.module.set_listening_socket(socket=self.socket_id, port=port)
+        self._module.set_listening_socket(socket=self.socket_id, port=port)
         self.able_to_receive = True
 
     def recvfrom(self, bufsize):
@@ -54,7 +54,7 @@ class UDPSocket(UbloxSocket):
                           'set the socket to listening via .bind() or write '
                           'once on the socket.')
 
-        result = self.module.read_udp_data(socket=self.socket_id, length=bufsize)
+        result = self._module.read_udp_data(socket=self.socket_id, length=bufsize)
         if result:
             ip, port, length, hex_data = result
             address = (ip.decode(), int(port))
