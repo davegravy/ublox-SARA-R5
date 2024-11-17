@@ -2,6 +2,11 @@ from enum import Enum
 import validators
 from typing import TYPE_CHECKING
 
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.serialization import Encoding
+from cryptography.x509 import load_pem_x509_certificate
+import hashlib
+
 if TYPE_CHECKING:
     from modules import SaraR5Module, ATError
 
@@ -70,7 +75,7 @@ class SecurityProfile:
                 profile IDs and the values are dictionaries containing the profile data.
 
         Returns:
-            dict: A dictionary of SecurityProfile instances, where the keys are profile IDs.
+            The supplied profile_data with the created security profiles added under the 'security_profile' key
 
         The format for profile_data is as follows:
         {
@@ -90,12 +95,10 @@ class SecurityProfile:
             ...
         }
         """
-        security_profiles = {}
-
         for profile_name, data in profile_data.items():
             profile_id = data['profile_id']
             security_profile:SecurityProfile = module.create_security_profile(profile_id)
-            profile_data[profile_name] = security_profile
+            profile_data[profile_name]["security_profile"] = security_profile
 
             ca_cert = data.get('ca_cert')
             ca_cert_name = data.get('ca_cert_name')
@@ -119,7 +122,7 @@ class SecurityProfile:
 
             security_profile.configure_security_profile(hostname, ca_cert=ca_cert_name, client_cert=client_cert_name, client_key=client_key_name, ca_validation_level=SecurityProfile.CAValidationLevel.LEVEL_2_URL_INTEGRITY_CHECK)
 
-        return security_profiles
+        return profile_data
 
     def upload_cert_key(self, filepath, cert_type:CertificateType,
                             internal_name=None, filename_out=None):
@@ -149,6 +152,24 @@ class SecurityProfile:
                                                     internal_name, filename_out)
         self._module.logger.info('Uploaded file %s to %s "%s"', filepath, cert_type.value, internal_name)
         return internal_name
+    
+    @staticmethod
+    def der_md5_from_pem_file(filepath):
+        """
+        Calculates the MD5 hash of a DER-encoded certificate from a PEM file.
+
+        Args:
+            filepath (str): The path to the PEM file.
+
+        Returns:
+            str: The MD5 hash of the DER-encoded certificate.
+        """
+        with open(filepath, 'rb') as f:
+            pem_data = f.read()
+        cert = load_pem_x509_certificate(pem_data)
+        der_data = cert.public_bytes(Encoding.DER)
+        md5_hash = hashlib.md5(der_data).hexdigest()
+        return md5_hash
 
     def configure_security_profile(self, hostname, ca_cert=None, client_cert=None, client_key=None,
                                    ca_validation_level=CAValidationLevel.LEVEL_1_LOCAL_CERT_CHECK,

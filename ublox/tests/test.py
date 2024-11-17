@@ -62,20 +62,20 @@ def configure_sec_profiles(module:SaraR5Module):
         #     'hostname': 'arms-api.aercoustics.com',
         #     'profile_id': 0
         # },
-        # "sentry":
-        # {
-        #     'ca_cert': '/root/sentry-ca.crt',
-        #     'ca_cert_name': 'digicert_global_root_g2',
-        #     'ca_cert_md5': 'e4a68ac854ac5242460afd72481b2a44',
-        #     'client_cert': None,
-        #     'client_cert_name': None,
-        #     'client_cert_md5': None,
-        #     'client_key': None,
-        #     'client_key_name': None,
-        #     'client_key_md5': None,
-        #     'hostname': 'sentry.io',
-        #     'profile_id': 1
-        # },
+        "sentry":
+        {
+            'ca_cert': '/root/sentry-ca.crt',
+            'ca_cert_name': 'digicert_global_root_g2',
+            'ca_cert_md5': 'e4a68ac854ac5242460afd72481b2a44',
+            'client_cert': None,
+            'client_cert_name': None,
+            'client_cert_md5': None,
+            'client_key': None,
+            'client_key_name': None,
+            'client_key_md5': None,
+            'hostname': 'sentry.io',
+            'profile_id': 1
+        },
         "iot":
         {
             'ca_cert': '/root/iot_test/root-CA.crt',
@@ -110,47 +110,47 @@ def configure_sec_profiles(module:SaraR5Module):
 
     #client_cert='/root/privatecert.pem', client_key='/root/privatekey.pem
 
-    for profile in security_profiles_data:
+    # for profile in security_profiles_data:
 
-        ca_cert = security_profiles_data[profile]["ca_cert"]
-        ca_cert_name = security_profiles_data[profile]["ca_cert_name"]
-        ca_cert_md5 = security_profiles_data[profile]["ca_cert_md5"]
-        client_cert = security_profiles_data[profile]["client_cert"]
-        client_cert_name = security_profiles_data[profile]["client_cert_name"]
-        client_cert_md5 = security_profiles_data[profile]["client_cert_md5"]
-        client_key = security_profiles_data[profile]["client_key"]
-        client_key_name = security_profiles_data[profile]["client_key_name"]
-        client_key_md5 = security_profiles_data[profile]["client_key_md5"]
-        hostname = security_profiles_data[profile]["hostname"]
-        profile_id = security_profiles_data[profile]["profile_id"]
+    #     ca_cert = security_profiles_data[profile]["ca_cert"]
+    #     ca_cert_name = security_profiles_data[profile]["ca_cert_name"]
+    #     ca_cert_md5 = security_profiles_data[profile]["ca_cert_md5"]
+    #     client_cert = security_profiles_data[profile]["client_cert"]
+    #     client_cert_name = security_profiles_data[profile]["client_cert_name"]
+    #     client_cert_md5 = security_profiles_data[profile]["client_cert_md5"]
+    #     client_key = security_profiles_data[profile]["client_key"]
+    #     client_key_name = security_profiles_data[profile]["client_key_name"]
+    #     client_key_md5 = security_profiles_data[profile]["client_key_md5"]
+    #     hostname = security_profiles_data[profile]["hostname"]
+    #     profile_id = security_profiles_data[profile]["profile_id"]
 
-        security_profile:SecurityProfile = module.create_security_profile(profile_id)
-        security_profiles_data[profile]["security_profile"] = security_profile
+    #     security_profile:SecurityProfile = module.create_security_profile(profile_id)
+    #     security_profiles_data[profile]["security_profile"] = security_profile
 
-        logger.info("-------------- getting cert md5")
-        if not SecurityProfile.at_get_cert_md5(module, SecurityProfile.CertificateType.CA_CERT, ca_cert_name)==ca_cert_md5:
-            security_profile.upload_cert_key(ca_cert, SecurityProfile.CertificateType.CA_CERT, ca_cert_name)
+    #     logger.info("-------------- getting cert md5")
+    #     if not SecurityProfile.at_get_cert_md5(module, SecurityProfile.CertificateType.CA_CERT, ca_cert_name)==ca_cert_md5:
+    #         security_profile.upload_cert_key(ca_cert, SecurityProfile.CertificateType.CA_CERT, ca_cert_name)
 
-        if client_cert:
-            logger.info("-------------- getting client cert")
-            if not SecurityProfile.at_get_cert_md5(module, SecurityProfile.CertificateType.CLIENT_CERT, client_cert_name)==client_cert_md5:
-                security_profile.upload_cert_key(client_cert, SecurityProfile.CertificateType.CLIENT_CERT, client_cert_name)
+    #     if client_cert:
+    #         logger.info("-------------- getting client cert")
+    #         if not SecurityProfile.at_get_cert_md5(module, SecurityProfile.CertificateType.CLIENT_CERT, client_cert_name)==client_cert_md5:
+    #             security_profile.upload_cert_key(client_cert, SecurityProfile.CertificateType.CLIENT_CERT, client_cert_name)
 
-        if client_key:
-            logger.info("-------------- getting client key")
-            if not SecurityProfile.at_get_cert_md5(module, SecurityProfile.CertificateType.CLIENT_PRIVATE_KEY, client_key_name)==client_key_md5:
-                security_profile.upload_cert_key(client_key, SecurityProfile.CertificateType.CLIENT_PRIVATE_KEY, client_key_name)
+    #     if client_key:
+    #         logger.info("-------------- getting client key")
+    #         if not SecurityProfile.at_get_cert_md5(module, SecurityProfile.CertificateType.CLIENT_PRIVATE_KEY, client_key_name)==client_key_md5:
+    #             security_profile.upload_cert_key(client_key, SecurityProfile.CertificateType.CLIENT_PRIVATE_KEY, client_key_name)
 
-        logger.info("-------------- configuring security profile")
-        security_profile.configure_security_profile(hostname, ca_cert=ca_cert_name, client_cert=client_cert_name, client_key=client_key_name, ca_validation_level=SecurityProfile.CAValidationLevel.LEVEL_2_URL_INTEGRITY_CHECK)
+    #     logger.info("-------------- configuring security profile")
+    #     security_profile.configure_security_profile(hostname, ca_cert=ca_cert_name, client_cert=client_cert_name, client_key=client_key_name, ca_validation_level=SecurityProfile.CAValidationLevel.LEVEL_2_URL_INTEGRITY_CHECK)
         
-        logger.info("-------------- creating http profile")
-        security_profiles_data[profile]["http_profile"] = module.create_http_profile(profile_id=profile_id, security_profile=security_profile)
-    # arms - http_profile.set_server_params(hostname=hostname, port=443, ssl=True, timeout=30, headers={"authentication-token":"34291120-7c19-448e-a0d8-bdb823bfdff8","accept":"application/json"})
-        security_profiles_data[profile]["http_profile"].set_server_params(hostname=security_profiles_data[profile]["hostname"], port=443, ssl=True, timeout=30, headers={})
+    #     logger.info("-------------- creating http profile")
+    #     security_profiles_data[profile]["http_profile"] = module.create_http_profile(profile_id=profile_id, security_profile=security_profile)
+    # # arms - http_profile.set_server_params(hostname=hostname, port=443, ssl=True, timeout=30, headers={"authentication-token":"34291120-7c19-448e-a0d8-bdb823bfdff8","accept":"application/json"})
+    #     security_profiles_data[profile]["http_profile"].set_server_params(hostname=security_profiles_data[profile]["hostname"], port=443, ssl=True, timeout=30, headers={})
 
-    return security_profiles_data
-
+    # return security_profiles_data
+    return SecurityProfile.create_security_profiles(module, security_profiles_data)
 def test_socket():
     sock = module.create_socket()
     sock.sendto(b'Message To Echo Server', ('195.34.89.241', 7))
@@ -220,7 +220,8 @@ try:
     
     security_profiles_data = configure_sec_profiles(module)
     #arms_profile:HTTPClient = security_profiles_data["arms"]["http_profile"]
-    #sentry_profile:HTTPClient = security_profiles_data["sentry"]["http_profile"]
+    sentry_http_client:HTTPClient = module.create_http_profile(profile_id=security_profiles_data["sentry"]["profile_id"], security_profile=security_profiles_data["sentry"]["security_profile"])
+
     
     mqtt:MQTTClient = module.mqtt_client
     mqtt.configure(client_id="ARMS-GFY-P0", server_params={"hostname":"a1k9ecto9j720o-ats.iot.us-east-1.amazonaws.com", "port":8883, "ssl":True}, security_profile=security_profiles_data["iot"]["security_profile"])
@@ -236,8 +237,7 @@ try:
     retry_command(mqtt.disconnect, max_retries, retry_delay)
 
     if lpm: 
-        module.at_set_power_saving_uart_mode(SaraR5Module.PowerSavingUARTMode.ENABLED,
-                                        timeout=250) #TODO: investigate idle optimization
+        module.prep_for_sleep()
 
     time.sleep(80)
     #TODO: investigate CEPPI (power saving preference)
@@ -267,11 +267,14 @@ try:
         #retry_command(mqtt.publish, max_retries, retry_delay, topic=topic, message=message, qos=1)
         retry_command(mqtt.publish_file, max_retries, retry_delay, topic=topic_json, send_filename=send_filename, qos=1) 
         retry_command(mqtt.disconnect, max_retries, retry_delay)
+
+        # logger.info("-------------- starting Sentry post")
+        # result = sentry_http_client.post('/root/sentry-body.txt', content_type=HTTPClient.ContentType.APPLICATION_JSON, server_path=f'/api/{SENTRY_PROJECT_NUMBER}/envelope/')
+
+
         if lpm: module.prep_for_sleep()
 
         #USER CODE ENDS HERE
-        # logger.info("-------------- starting Sentry post")
-        # result = sentry_profile.post('/root/sentry-body.txt', content_type=HTTPClient.ContentType.APPLICATION_JSON, server_path=f'/api/{SENTRY_PROJECT_NUMBER}/envelope/')
         # logger.debug(result)
         #TODO: investigate AT+UDCONF=89,1 
         # https://content.u-blox.com/sites/default/files/documents/SARA-R5-LEXI-R5_ATCommands_UBX-19047455.pdf#page=122
