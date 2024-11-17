@@ -1,5 +1,4 @@
 from enum import Enum
-import logging
 import validators
 from typing import TYPE_CHECKING
 
@@ -59,6 +58,68 @@ class SecurityProfile:
         self.at_reset_security_profile()
         self.hostname_ca_validation = ""
         self.hostname_sni = ""
+
+    @staticmethod
+    def create_security_profiles(module:'SaraR5Module', profile_data:dict):
+        """
+        Creates security profiles from a dictionary of profile data.
+
+        Args:
+            module (SaraR5Module): The SaraR5Module instance.
+            profile_data (dict): A dictionary of profile data, where the keys are 
+                profile IDs and the values are dictionaries containing the profile data.
+
+        Returns:
+            dict: A dictionary of SecurityProfile instances, where the keys are profile IDs.
+
+        The format for profile_data is as follows:
+        {
+            "profile_name": {
+                'ca_cert': str,          # Path to the CA certificate
+                'ca_cert_name': str,     # Name of the CA certificate
+                'ca_cert_md5': str,      # MD5 hash of the CA certificate
+                'client_cert': str,      # Path to the client certificate
+                'client_cert_name': str, # Name of the client certificate
+                'client_cert_md5': str,  # MD5 hash of the client certificate
+                'client_key': str,       # Path to the client key
+                'client_key_name': str,  # Name of the client key
+                'client_key_md5': str,   # MD5 hash of the client key
+                'hostname': str,         # Hostname for the profile, no port or protocol
+                'profile_id': int        # Profile ID
+            },
+            ...
+        }
+        """
+        security_profiles = {}
+
+        for profile_name, data in profile_data.items():
+            profile_id = data['profile_id']
+            security_profile:SecurityProfile = module.create_security_profile(profile_id)
+            profile_data[profile_name] = security_profile
+
+            ca_cert = data.get('ca_cert')
+            ca_cert_name = data.get('ca_cert_name')
+            ca_cert_md5 = data.get('ca_cert_md5')
+            client_cert = data.get('client_cert')
+            client_cert_name = data.get('client_cert_name')
+            client_cert_md5 = data.get('client_cert_md5')
+            client_key = data.get('client_key')
+            client_key_name = data.get('client_key_name')
+            client_key_md5 = data.get('client_key_md5')
+            hostname = data.get('hostname')
+
+            if ca_cert and SecurityProfile.at_get_cert_md5(module, SecurityProfile.CertificateType.CA_CERT, ca_cert_name) != ca_cert_md5:
+                security_profile.upload_cert_key(ca_cert, SecurityProfile.CertificateType.CA_CERT, ca_cert_name)
+
+            if client_cert and SecurityProfile.at_get_cert_md5(module, SecurityProfile.CertificateType.CLIENT_CERT, client_cert_name) != client_cert_md5:
+                security_profile.upload_cert_key(client_cert, SecurityProfile.CertificateType.CLIENT_CERT, client_cert_name)
+
+            if client_key and SecurityProfile.at_get_cert_md5(module, SecurityProfile.CertificateType.CLIENT_PRIVATE_KEY, client_key_name) != client_key_md5:
+                security_profile.upload_cert_key(client_key, SecurityProfile.CertificateType.CLIENT_PRIVATE_KEY, client_key_name)
+
+            security_profile.configure_security_profile(hostname, ca_cert=ca_cert_name, client_cert=client_cert_name, client_key=client_key_name, ca_validation_level=SecurityProfile.CAValidationLevel.LEVEL_2_URL_INTEGRITY_CHECK)
+
+        return security_profiles
 
     def upload_cert_key(self, filepath, cert_type:CertificateType,
                             internal_name=None, filename_out=None):

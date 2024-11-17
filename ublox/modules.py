@@ -34,6 +34,7 @@ import logging
 import time
 import serial
 import validators
+import errno
 
 
 from ublox.http import HTTPClient
@@ -685,13 +686,18 @@ class SaraR5Module:
         self.power_control.close()
         self.logger.debug('closed power control')
 
-    def wake_from_sleep(self):    
+    def wake_from_sleep(self):
         self.serial_init()
+        #TODO: call function self.restore_NVM(). Track non-volatile settings in module class and restore them to device from this function    
+        #e.g. MQTT settings, security profiles, etc
         self.at_set_power_saving_uart_mode(SaraR5Module.PowerSavingUARTMode.DISABLED)
         self.at_set_lwm2m_activation(False)
         self.at_set_error_format(SaraR5Module.ErrorFormat.VERBOSE) # verbose format
         self.at_set_eps_network_reg_status(
              SaraR5Module.EPSNetRegistrationReportConfig.ENABLED_WITH_LOCATION_AND_PSM)
+        self.mqtt_client.at_set_mqtt_nonvolatile(MQTTClient.NonVolatileOption.RESTORE_FROM_NVM)
+
+        
         
     def register_after_wake(self):
         self.at_set_module_functionality(SaraR5Module.ModuleFunctionality.RESTORE_PROTOCOL_STACK)
@@ -800,8 +806,8 @@ class SaraR5Module:
             free_space = self.at_get_filesystem_free_space()
             file_size = os.path.getsize(filepath_in)
             if file_size > free_space:
-                raise ValueError(f'Not enough space on the device to upload {filepath_in}. 
-                                 {free_space} bytes available, {file_size} required')
+                raise OSError(errno.ENOSPC, f'Not enough space on the device to upload {filepath_in}. '
+                              f'{free_space} bytes available, {file_size} required')
 
         with open(filepath_in, 'rb') as f:
             data = f.read()

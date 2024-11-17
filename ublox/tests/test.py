@@ -246,7 +246,6 @@ try:
 
         module.wake_from_sleep()
         security_profiles_data = configure_sec_profiles(module)
-        mqtt.at_set_mqtt_nonvolatile(MQTTClient.NonVolatileOption.RESTORE_FROM_NVM)
 
 
         #DO OFFLINE PREP HERE
