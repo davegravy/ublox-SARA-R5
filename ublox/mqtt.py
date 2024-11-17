@@ -2,6 +2,7 @@ import logging
 import time
 import traceback
 import threading
+import os
 from enum import Enum
 from typing import TYPE_CHECKING, Dict, Optional
 
@@ -201,7 +202,7 @@ class MQTTClient:
             topic, message, qos_level
         )
 
-    def publish_file(self, topic: str, send_filename: str, qos=1):
+    def publish_file_on_module(self, topic: str, send_filename: str, qos=1):
         """
         Publish a file to a topic.
         Args:
@@ -215,6 +216,24 @@ class MQTTClient:
             f"Failed to publish file to topic {topic}",
             topic, send_filename, qos_level
         )
+
+    def publish_local_file(self, topic: str, in_file: str, qos=1, overwrite=False):
+        """
+        Publish a file to a topic.
+        Args:
+            topic (str): The topic to publish the file to.
+            in_file (str): The file on the local filesystem to send as message.
+            qos (QoSLevel, optional): The Quality of Service level for the message. Default is QoSLevel.AT_MOST_ONCE.
+            overwrite (bool, optional): Whether to overwrite the file on the module if it already exists. Default is False.
+        """
+        out_filename = os.path.basename(in_file)
+        try:
+            self._module.upload_local_file_to_fs(in_file,out_filename,overwrite)
+        except FileExistsError as e:
+            if not overwrite:
+                self._module.logger.debug("File already exists on module, skipping upload")
+                
+        self.publish_file_on_module(topic, out_filename, qos)
 
     def subscribe(self, topic: str, qos=1):
         """

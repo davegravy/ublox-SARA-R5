@@ -1,11 +1,15 @@
-from enum import Enum
 import validators
-from typing import TYPE_CHECKING
+import re
+import base64
+import hashlib
 
+from enum import Enum
+from typing import TYPE_CHECKING
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.serialization import Encoding
+from cryptography.hazmat.backends import default_backend
 from cryptography.x509 import load_pem_x509_certificate
-import hashlib
+
 
 if TYPE_CHECKING:
     from modules import SaraR5Module, ATError
@@ -59,7 +63,7 @@ class SecurityProfile:
             raise ValueError("Profile id must be between 0 and 4")
 
         self.profile_id = profile_id
-        self._module = module
+        self._module:SaraR5Module = module
         self.at_reset_security_profile()
         self.hostname_ca_validation = ""
         self.hostname_sni = ""
@@ -156,20 +160,45 @@ class SecurityProfile:
     @staticmethod
     def der_md5_from_pem_file(filepath):
         """
-        Calculates the MD5 hash of a DER-encoded certificate from a PEM file.
+        Helper function: calculates the MD5 hash of a DER-encoded certificate or a PEM-encoded private key.
 
         Args:
             filepath (str): The path to the PEM file.
 
         Returns:
-            str: The MD5 hash of the DER-encoded certificate.
+            str: The MD5 hash of the DER-encoded certificate or the private key.
+
+        Raises:
+            ValueError: If the file is not a recognized PEM file format or contains invalid data.
         """
         with open(filepath, 'rb') as f:
             pem_data = f.read()
-        cert = load_pem_x509_certificate(pem_data)
-        der_data = cert.public_bytes(Encoding.DER)
-        md5_hash = hashlib.md5(der_data).hexdigest()
-        return md5_hash
+
+        # Check if the PEM file is a private key
+        if re.search(b"-----BEGIN .*PRIVATE KEY-----", pem_data):
+            try:
+                # Strip the PEM headers and decode the base64 content
+                key_data = re.sub(b"-----.*?-----", b"", pem_data).strip()
+                der_data = base64.b64decode(key_data)
+
+                # Calculate and return the MD5 hash of the DER-encoded private key
+                return hashlib.md5(der_data).hexdigest()
+            except Exception as e:
+                raise ValueError(f"Unable to process private key file {filepath}: {e}")
+
+        try:
+            # Load the PEM certificate
+            cert = load_pem_x509_certificate(pem_data, backend=default_backend())
+
+            # Convert the certificate to DER format
+            der_data = cert.public_bytes(Encoding.DER)
+
+            # Calculate and return the MD5 hash of the DER-encoded certificate
+            return hashlib.md5(der_data).hexdigest()
+        except ValueError as e:
+            raise ValueError(f"Unable to process certificate file {filepath}: {e}")
+
+
 
     def configure_security_profile(self, hostname, ca_cert=None, client_cert=None, client_key=None,
                                    ca_validation_level=CAValidationLevel.LEVEL_1_LOCAL_CERT_CHECK,
