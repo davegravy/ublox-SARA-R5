@@ -773,7 +773,7 @@ class SaraR5Module:
 
 # High level control
 
-    def upload_local_file_to_fs(self, filepath_in, filename_out, overwrite=False):
+    def upload_local_file_to_fs(self, filepath_in, filename_out, overwrite=False, check_space=False):
         """
         Uploads a local file to the filesystem of the device.
 
@@ -782,6 +782,8 @@ class SaraR5Module:
             filename_out (str): The name of the file to be created on the device's filesystem.
             overwrite (bool, optional): If True, overwrites the file if it already exists. 
                 If False and the file exists, a ValueError is raised. Defaults to False.
+            check_space (bool, optional): If True, checks the available space on the device's
+                filesystem before uploading the file. Defaults to False.
         """
         file_exists = True
         try:
@@ -793,6 +795,13 @@ class SaraR5Module:
             raise FileExistsError(f'File {filename_out} already exists')
         if file_exists and overwrite:
             self.at_delete_file(filename_out)
+
+        if check_space:
+            free_space = self.at_get_filesystem_free_space()
+            file_size = os.path.getsize(filepath_in)
+            if file_size > free_space:
+                raise ValueError(f'Not enough space on the device to upload {filepath_in}. 
+                                 {free_space} bytes available, {file_size} required')
 
         with open(filepath_in, 'rb') as f:
             data = f.read()
@@ -1290,6 +1299,30 @@ class SaraR5Module:
         self.logger.info('Signalling connection URC set to %s', config.name)
 
 # Filesystem
+
+    
+
+    def at_get_filesystem_free_space(self):
+        """
+        Gets the available space in the module's filesystem.
+
+        Returns:
+            An int representing available space in bytes.
+        """
+        result = self.send_command('AT+ULSTFILE=1', expected_reply=True)
+        return int(result)
+    
+    def at_get_file_size(self,filename):
+        """
+        Gets the size of a file in the module's filesystem.
+
+        Returns:
+            An int representing the size of the file in bytes.
+        """
+        SaraR5Module.validate_filename(filename)
+
+        result = self.send_command(f'AT+ULSTFILE=2,{filename}', expected_reply=True)
+        return result
 
     def at_upload_to_filesystem(self, filename, length, data):
         """
