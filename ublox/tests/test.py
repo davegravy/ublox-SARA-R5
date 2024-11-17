@@ -1,16 +1,33 @@
 import logging
+from systemd.journal import JournalHandler
 from ublox.modules import SaraR5Module
 from ublox.power_control import AT91PowerControl
 from ublox.utils import EDRXMode
 from ublox.security_profile import SecurityProfile
 from ublox.http import HTTPClient
-from ublox.mqtt import MQTTClient
+from ublox.mqtt import MQTTClient, MQTTBrokerError
 from ublox.utils import PSMPeriodicTau, PSMActiveTime
 import time
 
 
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s.%(msecs)03d %(levelname)s %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("test")
+logger_journal_handler = JournalHandler()
+logger_journal_handler.addFilter(lambda record: setattr(record, 'SYSLOG_IDENTIFIER', 'test') or True)
+logger_journal_handler.setFormatter(logging.Formatter('%(levelname)s %(message)s'))
+logger.addHandler(logger_journal_handler)
+
+sara_logger = logging.getLogger("SARA")
+sara_logger_journal_handler = JournalHandler()
+sara_logger_journal_handler.addFilter(lambda record: setattr(record, 'SYSLOG_IDENTIFIER', 'SARA') or True)
+sara_logger_journal_handler.setFormatter(logging.Formatter('%(levelname)s %(message)s'))
+sara_logger.addHandler(sara_logger_journal_handler)
+
+sara_txrx_logger = logging.getLogger("SARA_TXRX")
+sara_txrx_logger_journal_handler = JournalHandler()
+sara_txrx_logger_journal_handler.addFilter(lambda record: setattr(record, 'SYSLOG_IDENTIFIER', 'SARA_TXRX') or True)
+sara_txrx_logger_journal_handler.setFormatter(logging.Formatter('%(levelname)s %(message)s'))
+sara_txrx_logger.addHandler(sara_txrx_logger_journal_handler)
 
 #Commands for a new module
 #TODO: for pytest: https://stackoverflow.com/questions/46492209/how-to-emulate-data-from-a-serial-port-using-python-3-unittest-mocks
@@ -145,31 +162,35 @@ def retry_command(command, max_retries, retry_delay, *args, **kwargs):
     for attempt in range(max_retries):
         try:
             command(*args, **kwargs)
-            print("Command executed successfully")
+            logger.debug("Command executed successfully")
             return
         except RuntimeError as e:
+            logger.debug("in RuntimeError")
             if str(e) == "Not connected to MQTT broker":
-                print(f"Attempt {attempt + 1} failed: {e}. Reconnecting and retrying...")
+                logger.warning(f"Attempt {attempt + 1} failed: {e}. Reconnecting and retrying...")
                 try:
                     mqtt.connect()
                 except Exception as reconnect_error:
-                    print(f"Reconnection attempt {attempt + 1} failed: {reconnect_error}")
+                    logger.warning(f"Reconnection attempt {attempt + 1} failed: {reconnect_error}")
                     time.sleep(retry_delay)
                 else:
                     continue
             elif str(e) == "Another command is in progress":
-                print(f"Attempt {attempt + 1} failed: {e}. Retrying after delay...")
+                logger.warning(f"Attempt {attempt + 1} failed: {e}. Retrying after delay...")
                 time.sleep(retry_delay)
             else:
-                print(f"Attempt {attempt + 1} failed: {e}. No retry.")
+                logger.warning(f"Attempt {attempt + 1} failed: {e}. No retry.")
                 break
+        except MQTTBrokerError as e:
+            logger.warning(f"Attempt {attempt + 1} failed: {e}. Retrying after delay...")
+            time.sleep(retry_delay)
         except Exception as e:
-            print(f"An unexpected error occurred: {e}")
+            logger.error(f"An unexpected error occurred: {e}")
             break
     else:
-        print("Failed to execute command after maximum retries")
+        logger.error("Failed to execute command after maximum retries")
 
-module = SaraR5Module(serial_port='/dev/ttyS1', echo=False, power_control=AT91PowerControl,rtscts=True, baudrate=115200)
+module = SaraR5Module(serial_port='/dev/ttyS1', echo=False, power_control=AT91PowerControl,rtscts=True, baudrate=115200, logger=sara_logger, tx_rx_logger=sara_txrx_logger)
 apn = "ciot"
 mno_profile = SaraR5Module.MobileNetworkOperator.ROGERS
 #low power mode
@@ -177,6 +198,14 @@ lpm = True
 
 # module.setup(radio_mode='LTEM')
 # module.connect(operator=302720, apn="ciot")
+
+max_retries = 5
+retry_delay = 5  # seconds
+topic_opus="sound_data/ARMS-GFY-P0/opus" #TODO: investgiate why a comma after topic didn't throw an error
+topic_json="sound_data/ARMS-GFY-P0/json"
+#message=f"hello {time.time()}"
+#send_filename='2024-04-18T00-06-34+0-00_sEVT.opus'  
+send_filename='2024-11-07T20-30-00+00-00_sINT.json'
 
 try:
     module.serial_init(clean=True)
@@ -194,85 +223,67 @@ try:
     #sentry_profile:HTTPClient = security_profiles_data["sentry"]["http_profile"]
     
     mqtt:MQTTClient = module.mqtt_client
-    mqtt.set_client_id("ARMS-GFY-P0")
-    mqtt.set_server_params(hostname="a1k9ecto9j720o-ats.iot.us-east-1.amazonaws.com", port=8883, ssl=True)
-    mqtt.set_security_profile(security_profiles_data["iot"]["security_profile"])
-    mqtt.apply_config()
-    mqtt.at_set_mqtt_nonvolatile(MQTTClient.NonVolatileOption.STORE_TO_NVM)
-    
-    module.upload_local_file_to_fs('/root/iot_test/2024-04-18T00-06-34+0-00_sEVT.opus', '2024-04-18T00-06-34+0-00_sEVT.opus', overwrite=True)
+    mqtt.configure(client_id="ARMS-GFY-P0", server_params={"hostname":"a1k9ecto9j720o-ats.iot.us-east-1.amazonaws.com", "port":8883, "ssl":True}, security_profile=security_profiles_data["iot"]["security_profile"])
+
+    #module.upload_local_file_to_fs('/root/iot_test/2024-04-18T00-06-34+0-00_sEVT.opus', '2024-04-18T00-06-34+0-00_sEVT.opus', overwrite=True)
+    module.upload_local_file_to_fs('/root/iot_test/2024-11-07T20-30-00+00-00_sINT.json', '2024-11-07T20-30-00+00-00_sINT.json', overwrite=True)
+
     mqtt.connect()
     result = module.send_command(f'AT+CSQ',expected_reply=True)
-    mqtt.publish(topic="sound_data/ARMS-GFY-P0", message=f"hello {time.time()}", qos=1)
-    
-    mqtt.publish_file(topic="sound_data/ARMS-GFY-P0", send_filename='2024-04-18T00-06-34+0-00_sEVT.opus', qos=1)
-    #mqtt.subscribe(topic="config/issue/ARMS-GFY-P0", qos=1)
-    mqtt.disconnect()
+
+    #retry_command(mqtt.publish, max_retries, retry_delay, topic=topic, message=message, qos=1)
+    retry_command(mqtt.publish_file, max_retries, retry_delay, topic=topic_json, send_filename=send_filename, qos=1) 
+    retry_command(mqtt.disconnect, max_retries, retry_delay)
 
     if lpm: 
         module.at_set_power_saving_uart_mode(SaraR5Module.PowerSavingUARTMode.ENABLED,
-                                        timeout=40) #TODO: investigate idle optimization
-        
+                                        timeout=250) #TODO: investigate idle optimization
+
     time.sleep(80)
     #TODO: investigate CEPPI (power saving preference)
 
     while True:
 
-        # if module.psm_state != SaraR5Module.PSMState.PSM_INACTIVE:
-        module.serial_init()
-        module.at_set_power_saving_uart_mode(SaraR5Module.PowerSavingUARTMode.DISABLED)
-        module.at_set_lwm2m_activation(False)
-        module.at_set_error_format(SaraR5Module.ErrorFormat.VERBOSE) # verbose format
-        module.at_set_eps_network_reg_status(
-            SaraR5Module.EPSNetRegistrationReportConfig.ENABLED_WITH_LOCATION_AND_PSM)
+        module.wake_from_sleep()
         security_profiles_data = configure_sec_profiles(module)
-
         mqtt.at_set_mqtt_nonvolatile(MQTTClient.NonVolatileOption.RESTORE_FROM_NVM)
 
 
+        #DO OFFLINE PREP HERE
+
         #arms_profile:HTTPClient = security_profiles_data["arms"]["http_profile"]
         #sentry_profile:HTTPClient = security_profiles_data["sentry"]["http_profile"]
-        module.at_set_module_functionality(SaraR5Module.ModuleFunctionality.RESTORE_PROTOCOL_STACK)
-        module.at_set_module_functionality(SaraR5Module.ModuleFunctionality.FULL_FUNCTIONALITY)
-        module._await_connection(timeout=60)
-        #time.sleep(2)
-        module.at_get_psd_profile_status(0, SaraR5Module.PSDParameters.ACTIVATION_STATUS)
-        if not module.psd["is_active"]:
-            module.at_psd_action(0, SaraR5Module.PSDAction.ACTIVATE)
+        module.register_after_wake()
         #module.send_command(f'AT+UPING="www.google.com"',expected_reply=False)
 
        
+        #USER CODE STARTS HERE
 
         # logger.info("-------------- starting ARMS post")
         # result = arms_profile.post('/root/testpost.json', content_type=HTTPClient.ContentType.APPLICATION_JSON, server_path='/switchboard/v1.5/file_ready')
         # logger.debug(result)
-        time.sleep(5)
-        max_retries = 5
-        retry_delay = 5  # seconds
-        topic="sound_data/ARMS-GFY-P0" #TODO: investgiate why a comma after topic didn't throw an error
-        message=f"hello {time.time()}"
-        send_filename='2024-04-18T00-06-34+0-00_sEVT.opus'   
-
         mqtt.connect()
         result = module.send_command(f'AT+CSQ',expected_reply=True)
         #TODO: fix retry_command
-        retry_command(mqtt.publish, max_retries, retry_delay, topic=topic, message=message, qos=1)
-        retry_command(mqtt.publish_file, max_retries, retry_delay, topic=topic, send_filename=send_filename, qos=1) 
+        #retry_command(mqtt.publish, max_retries, retry_delay, topic=topic, message=message, qos=1)
+        retry_command(mqtt.publish_file, max_retries, retry_delay, topic=topic_json, send_filename=send_filename, qos=1) 
         retry_command(mqtt.disconnect, max_retries, retry_delay)
-        if lpm: module.at_set_power_saving_uart_mode(SaraR5Module.PowerSavingUARTMode.ENABLED,
-                                            timeout=40)
+        if lpm: module.prep_for_sleep()
 
+        #USER CODE ENDS HERE
         # logger.info("-------------- starting Sentry post")
         # result = sentry_profile.post('/root/sentry-body.txt', content_type=HTTPClient.ContentType.APPLICATION_JSON, server_path=f'/api/{SENTRY_PROJECT_NUMBER}/envelope/')
-        # print(result)
+        # logger.debug(result)
+        #TODO: investigate AT+UDCONF=89,1 
+        # https://content.u-blox.com/sites/default/files/documents/SARA-R5-LEXI-R5_ATCommands_UBX-19047455.pdf#page=122
         logger.info("starting sleep")
         time.sleep(540)
         logger.info("finished sleep")
 except Exception as e:
-    print("test.py exception handling")
+    logger.debug("test.py exception handling")
     raise e
 finally:
-    print("test.py finally method")
+    logger.debug("test.py finally method")
     module.close()
 
 #print(result)

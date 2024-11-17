@@ -6,8 +6,6 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from modules import SaraR5Module, ATError
 
-logger = logging.getLogger(__name__)
-
 class SecurityProfile:
     """
     Represents a security profile for the HTTP module.
@@ -88,7 +86,7 @@ class SecurityProfile:
         self._module.upload_local_file_to_fs(filepath, filename_out, overwrite=True)
         SecurityProfile.at_import_cert_from_file(self._module, cert_type,
                                                     internal_name, filename_out)
-        logger.info('Uploaded file %s to %s "%s"', filepath, cert_type.value, internal_name)
+        self._module.logger.info('Uploaded file %s to %s "%s"', filepath, cert_type.value, internal_name)
         return internal_name
 
     def configure_security_profile(self, hostname, ca_cert=None, client_cert=None, client_key=None,
@@ -151,7 +149,7 @@ class SecurityProfile:
         self.hostname_ca_validation = ""
         self.hostname_sni = ""
 
-        logger.info('Reset security profile %s', self.profile_id)
+        self._module.logger.info('Reset security profile %s', self.profile_id)
 
     def at_set_ca_validation_level(self, level: CAValidationLevel):
         """
@@ -162,7 +160,7 @@ class SecurityProfile:
         """
         self._module.send_command(f'AT+USECPRF={self.profile_id},0,{level.value}',
                                   expected_reply=False)
-        logger.info('Set CA validation level to %s for security profile %s',
+        self._module.logger.info('Set CA validation level to %s for security profile %s',
                     level.name, self.profile_id)
 
     def at_set_tls_version(self, version:TLSVersion=TLSVersion.TLS_1_2):
@@ -175,7 +173,7 @@ class SecurityProfile:
         """
         self._module.send_command(f'AT+USECPRF={self.profile_id},1,{version.value}',
                                     expected_reply=False)
-        logger.info('Set TLS version to %s for security profile %s', version.name, self.profile_id)
+        self._module.logger.info('Set TLS version to %s for security profile %s', version.name, self.profile_id)
 
     def at_set_ca_validation_server_hostname(self, hostname:str=""):
         """
@@ -192,7 +190,7 @@ class SecurityProfile:
         self._module.send_command(f'AT+USECPRF={self.profile_id},4,"{hostname}"',
                                     expected_reply=False)
         self.hostname_ca_validation = hostname
-        logger.info('Set CA validation server hostname to "%s" for security profile %s',
+        self._module.logger.info('Set CA validation server hostname to "%s" for security profile %s',
                     hostname, self.profile_id)
 
     def at_set_server_name_indication(self, sni=""):
@@ -210,7 +208,7 @@ class SecurityProfile:
 
         self._module.send_command(f'AT+USECPRF={self.profile_id},10,"{sni}"',expected_reply=False)
         self.hostname_sni = sni
-        logger.info('Set server name indication to "%s" for security profile %s',
+        self._module.logger.info('Set server name indication to "%s" for security profile %s',
                     sni, self.profile_id)
 
     def at_set_ca_cert(self, internal_name: str = ""):
@@ -231,7 +229,7 @@ class SecurityProfile:
 
         self._module.send_command(f'AT+USECPRF={self.profile_id},3,"{internal_name}"',
                                   expected_reply=False)
-        logger.info('Set CA cert to "%s" for security profile %s',
+        self._module.logger.info('Set CA cert to "%s" for security profile %s',
                     internal_name, self.profile_id)
 
     def at_set_client_cert(self, internal_name:str=""):
@@ -249,7 +247,7 @@ class SecurityProfile:
 
         self._module.send_command(f'AT+USECPRF={self.profile_id},5,"{internal_name}"',
                                     expected_reply=False)
-        logger.info('Set client cert to "%s" for security profile %s',
+        self._module.logger.info('Set client cert to "%s" for security profile %s',
                     internal_name, self.profile_id)
 
     def at_set_client_key(self, internal_name: str = ""):
@@ -270,7 +268,7 @@ class SecurityProfile:
 
         self._module.send_command(f'AT+USECPRF={self.profile_id},6,"{internal_name}"',
                                   expected_reply=False)
-        logger.info('Set client key to "%s" for security profile %s',
+        self._module.logger.info('Set client key to "%s" for security profile %s',
                     internal_name, self.profile_id)
 
     @staticmethod
@@ -322,7 +320,7 @@ class SecurityProfile:
         SaraR5Module.validate_filename(filename)
 
         module.send_command(f'AT+USECMNG=1,{cert_type.value},"{internal_name}","{filename}"')
-        logger.info('Imported %s from file "%s" to internal name %s',
+        module.logger.info('Imported %s from file "%s" to internal name %s',
                     cert_type.name, filename, internal_name)
 
     @staticmethod

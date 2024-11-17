@@ -14,8 +14,6 @@ if TYPE_CHECKING:
     from ublox.modules import SaraR5Module
     from ublox.security_profile import SecurityProfile
 
-logger = logging.getLogger(__name__)
-
 class HTTPClient:
     """
     A class representing an HTTP client.
@@ -167,7 +165,7 @@ class HTTPClient:
             if error_class == 3:
                 self.error_code = error_code
                 error_description = self.error_code_description
-                logger.error('HTTP GET failed with error code %s: %s',
+                self._module.logger.error('HTTP GET failed with error code %s: %s',
                                 error_code, error_description)
 
         else:
@@ -204,7 +202,7 @@ class HTTPClient:
             if error_class == 3:
                 self.error_code = error_code
                 error_description = self.error_code_description
-                logger.error('HTTP POST failed with error code %s: %s',
+                self._module.logger.error('HTTP POST failed with error code %s: %s',
                              error_code, error_description)
         else:
             data = self._module.at_read_file(result_filename,timeout=60)
@@ -296,7 +294,7 @@ class HTTPClient:
         self.completed = False
         self.error = False
 
-        logger.info("Reset HTTP profile %s", self.profile_id)
+        self._module.logger.info("Reset HTTP profile %s", self.profile_id)
 
     def at_set_http_server_ip(self, ip:str):
         """
@@ -310,7 +308,7 @@ class HTTPClient:
             raise ValueError("Invalid IPV4 address")
 
         self._module.send_command(f'AT+UHTTP={self.profile_id},0,"{ip}"',expected_reply=False)
-        logger.info("Set HTTP server IP to %s for HTTP profile %s",ip,self.profile_id)
+        self._module.logger.info("Set HTTP server IP to %s for HTTP profile %s",ip,self.profile_id)
 
     def at_set_http_server_hostname(self, hostname):
         """
@@ -327,7 +325,7 @@ class HTTPClient:
 
         self._module.send_command(f'AT+UHTTP={self.profile_id},1,"{hostname}"',expected_reply=False)
         self.hostname = hostname
-        logger.info('Set HTTP server hostname to "%s" for HTTP profile %s',
+        self._module.logger.info('Set HTTP server hostname to "%s" for HTTP profile %s',
                     hostname, self.profile_id)
 
     def at_set_http_server_port(self, port:int):
@@ -345,7 +343,7 @@ class HTTPClient:
 
         self._module.send_command(f'AT+UHTTP={self.profile_id},5,{port}',expected_reply=False)
         self.server_port = port
-        logger.info("Set HTTP server port to %s for HTTP profile %s", port, self.profile_id)
+        self._module.logger.info("Set HTTP server port to %s for HTTP profile %s", port, self.profile_id)
 
     def at_set_http_ssl(self, ssl:HTTPSConfig=HTTPSConfig.DISABLED, security_profile_id:int=None):
         """
@@ -364,12 +362,12 @@ class HTTPClient:
             raise ValueError("Security profile id must be None if SSL is disabled")
 
         at_command = f'AT+UHTTP={self.profile_id},6,{ssl.value}'
-        logger.debug('security_profile_id: %s',security_profile_id)
+        self._module.logger.debug('security_profile_id: %s',security_profile_id)
         if isinstance(security_profile_id, int):
             at_command = at_command + f',{security_profile_id}'
         self._module.send_command(at_command, expected_reply=False)
         self.ssl = ssl == HTTPClient.HTTPSConfig.ENABLED
-        logger.info("Set HTTP SSL to %s for HTTP profile %s", ssl.name, self.profile_id)
+        self._module.logger.info("Set HTTP SSL to %s for HTTP profile %s", ssl.name, self.profile_id)
 
     def at_set_http_timeout(self, timeout:int=180):
         """
@@ -384,7 +382,7 @@ class HTTPClient:
             raise ValueError("Timeout must be between 30 and 180 seconds")
         self._module.send_command(f'AT+UHTTP={self.profile_id},7,{timeout}',expected_reply=False)
         self.timeout = timeout
-        logger.info("Set HTTP timeout to %s seconds for HTTP profile %s",timeout,self.profile_id)
+        self._module.logger.info("Set HTTP timeout to %s seconds for HTTP profile %s",timeout,self.profile_id)
 
     def at_set_http_header(self, header_string:str="0:"):
         """
@@ -409,7 +407,7 @@ class HTTPClient:
 
         self._module.send_command(f'AT+UHTTP={self.profile_id},9,"{header_string}"',
                                     expected_reply=False)
-        logger.info('Set HTTP header to "%s" for HTTP profile %s', header_string, self.profile_id)
+        self._module.logger.info('Set HTTP header to "%s" for HTTP profile %s', header_string, self.profile_id)
 
     def at_http_get(self, server_path:str, response_filename:str):
         """
@@ -431,7 +429,7 @@ class HTTPClient:
         self.server_path = server_path
         self._await_http_response(timeout = self.timeout)
 
-        logger.info('HTTP GET request to "%s" for HTTP profile %s', self.url, self.profile_id)
+        self._module.logger.info('HTTP GET request to "%s" for HTTP profile %s', self.url, self.profile_id)
 
     def at_http_post(self, server_path, response_filename, send_filename, content_type:ContentType):
         """
@@ -457,7 +455,7 @@ class HTTPClient:
         if self.security_profile is not None:
             for attr in ['hostname_sni', 'hostname_ca_validation']:
                 if self.hostname != getattr(self.security_profile, attr):
-                    logger.warning(
+                    self._module.logger.warning(
                         'Security profile %s "%s" does not match HTTP profile hostname "%s"',
                         attr,getattr(self.security_profile, attr),self.hostname)
 
@@ -466,7 +464,7 @@ class HTTPClient:
                                     expected_reply=False)
         self.server_path = server_path
         self._await_http_response(timeout = self.timeout)
-        logger.info('HTTP POST request to "%s" for HTTP profile %s', self.url, self.profile_id)
+        self._module.logger.info('HTTP POST request to "%s" for HTTP profile %s', self.url, self.profile_id)
 
     def at_http_get_error(self):
         """
@@ -507,7 +505,7 @@ class HTTPClient:
             None
         """
         from ublox.modules import ConnectionTimeoutError
-        logging.info('Awaiting HTTP Response')
+        self._module.logger.info('Awaiting HTTP Response')
 
         start_time = time.time()
 
@@ -552,7 +550,7 @@ class HTTPClient:
         Returns:
             str: The URL of the HTTP connection.
         """
-        logger.debug('SSL status: %s',self.ssl)
+        self._module.logger.debug('SSL status: %s',self.ssl)
         protocol = "https" if self.ssl else "http"
         url = f'{protocol}://{self.hostname}:{self.server_port}{self.server_path}'
         return url
