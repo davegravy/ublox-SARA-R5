@@ -779,7 +779,7 @@ class SaraR5Module:
 
 # High level control
 
-    def upload_local_file_to_fs(self, filepath_in, filename_out, overwrite=False, check_space=False):
+    def upload_local_file_to_fs(self, filepath_in, filename_out, overwrite=False):
         """
         Uploads a local file to the filesystem of the device.
 
@@ -794,7 +794,7 @@ class SaraR5Module:
         file_exists = True
         try:
             self.at_read_file_blocks(filename_out, 0, 0)
-        except CMEError:
+        except CMEError as e:
             file_exists = False
 
         if file_exists and not overwrite:
@@ -802,18 +802,29 @@ class SaraR5Module:
         if file_exists and overwrite:
             self.at_delete_file(filename_out)
 
-        if check_space:
-            free_space = self.at_get_filesystem_free_space()
-            file_size = os.path.getsize(filepath_in)
-            if file_size > free_space:
-                raise OSError(errno.ENOSPC, f'Not enough space on the device to upload {filepath_in}. '
-                              f'{free_space} bytes available, {file_size} required')
-
         with open(filepath_in, 'rb') as f:
             data = f.read()
             length = len(data)
+        try:
             self.at_upload_to_filesystem(filename_out, length, data)
+        except CMEError as e:
+            raise OSError(errno.ENOSPC, f'Not enough space on the device to upload {filepath_in}.')
 
+    def delete_all_files(self, except_files=None):
+        """
+        Deletes all files on the device's filesystem.
+
+        Args:
+            except_files (list, optional): A list of files to exclude from deletion. Defaults to None.
+        """
+        self.logger.info(f'Deleting all files on module{ 'except ' + except_files if except_files else ''}.')
+        files = self.at_list_files()
+        for file in files:
+            if except_files and file in except_files:
+                continue
+            self.logger.debug('Deleting file %s', file)
+            self.at_delete_file(file)
+            
 
     def update_radio_statistics(self):
         """
@@ -1307,6 +1318,16 @@ class SaraR5Module:
 # Filesystem
 
     
+    def at_list_files(self):
+        """
+        Lists all files in the module's filesystem.
+
+        Returns:
+            A list of filenames.
+        """
+        result = self.send_command('AT+ULSTFILE=0', expected_reply=True)
+        return result
+
     def at_get_filesystem_free_space(self):
         """
         Gets the available space in the module's filesystem.
@@ -1315,7 +1336,7 @@ class SaraR5Module:
             An int representing available space in bytes.
         """
         result = self.send_command('AT+ULSTFILE=1', expected_reply=True)
-        return int(result)
+        return int(result[0])
     
     def at_get_file_size(self,filename):
         """
@@ -1560,7 +1581,12 @@ class SaraR5Module:
     def _write_serial_and_log(self,data):
         self._serial.write(data)
         timestamp_str = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S-%f")
-        self.tx_rx_logger.debug('TX: %s',data)
+        if len(data) < 1024:
+            self.tx_rx_logger.debug('TX: %s',data)
+        else:
+            #data too big to log
+            self.tx_rx_logger.debug('TX: %s',data[:1024])
+
         #self.send_log.write(f'{timestamp_str};{data}\n')
 
     def _read_from_uart(self):

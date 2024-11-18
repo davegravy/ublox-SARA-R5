@@ -1,4 +1,5 @@
 import logging
+import re
 import time
 import traceback
 import threading
@@ -245,7 +246,8 @@ class MQTTClient:
                 self._module.logger.debug("File already exists on module, skipping upload")
                 
         self.publish_file_on_module(topic, out_filename, qos)
-        self._module.at_delete_file(out_filename)
+        if delete_on_success:
+            self._module.at_delete_file(out_filename)
 
     def subscribe(self, topic: str, qos=1):
         """
@@ -288,10 +290,10 @@ class MQTTClient:
         Args:
             timeout (int, optional): The maximum time to wait for a message in seconds. Default is 10 seconds.
         """
+        self._module.logger.info("Waiting via subscription for message up to %d seconds", timeout)
         start_time = time.time()
         while time.time() - start_time < timeout:
             if self.message_count > 0:
-                self.message_count -= 1
                 return
             time.sleep(0.25)
         raise TimeoutError("No message received within timeout")
@@ -302,9 +304,13 @@ class MQTTClient:
         Args:
             callback (callable): The callback function to call for each message.
         """
-        messages = self._command_handler.at_mqtt_read_messages()
-        for message in messages:
+        
+        self._module.logger.info("Fetching MQTT messages")
+        message_count = self.message_count
+        for i in range(message_count):
+            message = self._command_handler.at_mqtt_read_message()
             callback(self, None, message)
+            self.message_count -= 1
 
     def handle_uumqttc(self, data):
         """
@@ -534,46 +540,46 @@ class MQTTCommandHandler:
 
         self._module.send_command(f'AT+UMQTTC=0', expected_reply=False)
 
-    def at_mqtt_read_messages(self, hex_mode=False):
+    def at_mqtt_read_message(self, hex_mode=False):
         """
-        Reads messages from the module.
+        Reads a message from the module.
         Args:
             hex_mode (bool, optional): Whether to read messages in hex mode. Default is False.
         """
-        message_data = self._module.send_command(f'AT+UMQTTC=6,0{",1" if hex_mode else ""}', expected_reply=True)
-        self._module.logger.debug("Received MQTT messages: %s", message_data)
+        message_data = self._module.send_command(f'AT+UMQTTC=6,1{",1" if hex_mode else ""}', expected_reply=True, expected_multiline_reply=True)
+        message:MQTTMessage = self.parse_mqtt_message(message_data)
+        self._module.logger.debug("Parsed MQTTMessage: %s", vars(message))
+        return message
 
-        messages = []
-        i = 0
-        while i < len(message_data):
-            qos = int(message_data[i])
-            topic_msg_length = int(message_data[i + 1])
-            topic_length = int(message_data[i + 2])
-            topic_name = message_data[i + 3]
-            read_msg_length = int(message_data[i + 4])
-            read_msg = message_data[i + 5]
-            messages.append({
-                "qos": qos,
-                "topic_msg_length": topic_msg_length,
-                "topic_length": topic_length,
-                "topic": topic_name,
-                "read_msg_length": read_msg_length,
-                "payload": read_msg
-            })
-            i += 6
+    def parse_mqtt_message(self, message_data):
+        """
+        Parses MQTT message data from the module.
+        Args:
+            message_data (list of bytes): The raw message data from the module.
+        Returns:
+            dict: Parsed components, including qos, topic, and message content.
+        """
+        if not message_data:
+            return {}
 
-            messages.append(MQTTMessage(
-                qos=qos,
-                topic_msg_length=topic_msg_length,
-                topic_length=topic_length,
-                topic=topic_name,
-                read_msg_length=read_msg_length,
-                payload=read_msg
-            ))
+        # Combine all lines into one string and decode from bytes
+        raw_message = b''.join(message_data)
+        
+        # Use regex to match the initial metadata
+        match = re.match(rb'\+UMQTTC: 6,(\d+),(\d+),(\d+),"([^"]+)",(\d+),"(.*)"', raw_message, re.DOTALL)
+        if not match:
+            raise ValueError("Message format not recognized")
 
-        self._module.logger.debug("Parsed MQTT messages: %s", messages)
+        message = MQTTMessage(
+                 qos=int(match.group(1)),
+                 topic_msg_length=int(match.group(2)),
+                 topic_length=int(match.group(3)),
+                 topic=match.group(4).decode('utf-8'),
+                 read_msg_length=int(match.group(5)),
+                 payload=match.group(6)
+             )
 
-        return messages
+        return message
     
     def at_get_command_error(self):
         """
