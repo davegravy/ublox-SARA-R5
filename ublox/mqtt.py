@@ -13,6 +13,15 @@ if TYPE_CHECKING:
 class MQTTBrokerError(Exception):
     """UMQTTER on Module"""
 
+class MQTTMessage:
+    def __init__(self, qos, topic_msg_length, topic_length, topic, read_msg_length, payload):
+        self.qos = qos
+        self.topic_msg_length = topic_msg_length
+        self.topic_length = topic_length
+        self.topic = topic
+        self.read_msg_length = read_msg_length
+        self.payload = payload
+
 class MQTTClient:
     """
     A singleton class representing an MQTT client for the SARA-R5 module.
@@ -66,7 +75,7 @@ class MQTTClient:
             raise ValueError("Module must be set")
   
         self._module = module
-        self._command_handler=MQTTCommandHandler(module)
+        self._command_handler=MQTTCommandHandler(self)
         self.security_profile = None
         self.hostname = ""
         self.port = 1883
@@ -74,6 +83,7 @@ class MQTTClient:
         self.client_id = None
         self.username = ""
         self.password = ""
+        self.message_count = 0
 
     def configure(self, client_id, server_params:dict, security_profile):
         hostname = server_params.get('hostname')
@@ -217,7 +227,7 @@ class MQTTClient:
             topic, send_filename, qos_level
         )
 
-    def publish_local_file(self, topic: str, in_file: str, qos=1, overwrite=False):
+    def publish_local_file(self, topic: str, in_file: str, qos=1, overwrite=False, delete_on_success=False):
         """
         Publish a file to a topic.
         Args:
@@ -225,6 +235,7 @@ class MQTTClient:
             in_file (str): The file on the local filesystem to send as message.
             qos (QoSLevel, optional): The Quality of Service level for the message. Default is QoSLevel.AT_MOST_ONCE.
             overwrite (bool, optional): Whether to overwrite the file on the module if it already exists. Default is False.
+            delete_on_success (bool, optional): Whether to delete the file on the module filesystem after publishing. Default is False.
         """
         out_filename = os.path.basename(in_file)
         try:
@@ -234,6 +245,7 @@ class MQTTClient:
                 self._module.logger.debug("File already exists on module, skipping upload")
                 
         self.publish_file_on_module(topic, out_filename, qos)
+        self._module.at_delete_file(out_filename)
 
     def subscribe(self, topic: str, qos=1):
         """
@@ -269,6 +281,30 @@ class MQTTClient:
             self._command_handler.at_mqtt_disconnect,
             "Failed to disconnect from MQTT broker"
         )
+
+    def await_message(self, timeout=10):
+        """
+        Wait for a message to be received.
+        Args:
+            timeout (int, optional): The maximum time to wait for a message in seconds. Default is 10 seconds.
+        """
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            if self.message_count > 0:
+                self.message_count -= 1
+                return
+            time.sleep(0.25)
+        raise TimeoutError("No message received within timeout")
+    
+    def fetch_messages(self, callback):
+        """
+        Fetch messages from the module and call the callback function for each message.
+        Args:
+            callback (callable): The callback function to call for each message.
+        """
+        messages = self._command_handler.at_mqtt_read_messages()
+        for message in messages:
+            callback(self, None, message)
 
     def handle_uumqttc(self, data):
         """
@@ -379,15 +415,17 @@ class MQTTCommandHandler:
         NOT_RETAIN = 0
         RETAIN = 1
 
-    def __init__(self, module: 'SaraR5Module'):
-        self._module = module
+    def __init__(self, mqttc_client: MQTTClient):
+
+        self._mqttc_client = mqttc_client 
+        self._module = self._mqttc_client._module
         self.lock = threading.Lock()
         self.connected = False
         self.command_in_progress = None
         self.broker_error = False
         self.broker_error_code = None
         self.broker_error_message = None
-        self.message_count = 0
+
 
     def await_command(self, timeout=180):
         """
@@ -496,7 +534,47 @@ class MQTTCommandHandler:
 
         self._module.send_command(f'AT+UMQTTC=0', expected_reply=False)
 
-        
+    def at_mqtt_read_messages(self, hex_mode=False):
+        """
+        Reads messages from the module.
+        Args:
+            hex_mode (bool, optional): Whether to read messages in hex mode. Default is False.
+        """
+        message_data = self._module.send_command(f'AT+UMQTTC=6,0{",1" if hex_mode else ""}', expected_reply=True)
+        self._module.logger.debug("Received MQTT messages: %s", message_data)
+
+        messages = []
+        i = 0
+        while i < len(message_data):
+            qos = int(message_data[i])
+            topic_msg_length = int(message_data[i + 1])
+            topic_length = int(message_data[i + 2])
+            topic_name = message_data[i + 3]
+            read_msg_length = int(message_data[i + 4])
+            read_msg = message_data[i + 5]
+            messages.append({
+                "qos": qos,
+                "topic_msg_length": topic_msg_length,
+                "topic_length": topic_length,
+                "topic": topic_name,
+                "read_msg_length": read_msg_length,
+                "payload": read_msg
+            })
+            i += 6
+
+            messages.append(MQTTMessage(
+                qos=qos,
+                topic_msg_length=topic_msg_length,
+                topic_length=topic_length,
+                topic=topic_name,
+                read_msg_length=read_msg_length,
+                payload=read_msg
+            ))
+
+        self._module.logger.debug("Parsed MQTT messages: %s", messages)
+
+        return messages
+    
     def at_get_command_error(self):
         """
         Get the error code for a failed command.
@@ -549,10 +627,11 @@ class MQTTCommandHandler:
                     self._module.logger.error("MQTT command %s failed: %s", self.command_in_progress, urc_data)
 
             elif command_id == 6: # message count update
-                self.message_count = int(parts[1])
+                self._mqttc_client.message_count = int(parts[1])
 
             if command_id in [1, 2, 3, 4, 5]: 
                 self.command_in_progress = None 
+
 
 
 # Example usage:

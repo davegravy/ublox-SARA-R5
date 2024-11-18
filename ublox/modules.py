@@ -1307,7 +1307,6 @@ class SaraR5Module:
 # Filesystem
 
     
-
     def at_get_filesystem_free_space(self):
         """
         Gets the available space in the module's filesystem.
