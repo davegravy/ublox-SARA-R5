@@ -22,6 +22,7 @@ Example usage:
 """
 
 from enum import Enum
+from dataclasses import dataclass, field
 from functools import partial
 from collections import namedtuple
 from typing import Callable
@@ -60,6 +61,44 @@ class ConnectionTimeoutError(ATTimeoutError):
 
 class ModuleNotRespondingError(Exception):
     """Module did not respond"""
+
+class MobileNetworkOperator(Enum):
+    """
+    Represents the mobile network operator.
+
+    AT Command: AT+UMNOPROF=<MobileNetworkOperator>
+    """
+    UNDEFINED_REGULATORY = 0
+    SIM_ICCID_IMSI_SELECT = 1
+    AT_AND_T = 2
+    VERIZON = 3
+    TELSTRA = 4
+    T_MOBILE_US = 5
+    CHINA_TELECOM = 6
+    SPRINT = 8
+    VODAFONE = 19
+    NTT_DOCOMO = 20
+    TELUS = 21
+    SOFTBANK = 28
+    DEUTSCHE_TELEKOM = 31
+    US_CELLULAR = 32
+    VIVO = 33
+    LG_U_PLUS = 38
+    SKT = 39
+    KDDI = 41
+    ROGERS = 43
+    CLARO_BRASIL = 44
+    TIM_BRASIL = 45
+    ORANGE_FRANCE = 46
+    BELL = 47
+    GLOBAL = 90
+    STANDARD_EUROPE = 100
+    STANDARD_EUROPE_NO_EPCO = 101
+    STANDARD_JP_GLOBAL = 102
+    AT_AND_T_2_4_12 = 198
+    GENERIC_VOICE_CAPABLE_AT_AND_T = 199
+    GCF_PTCRB = 201
+    FIRSTNET = 206
 
 class AT_Command_Handler():
 
@@ -199,16 +238,79 @@ class AT_Command_Handler():
         debug_output = '\n          '.join(debug_str)
         #self.logger.debug('Received:%s          %s', chr(10), debug_output)
 
-class SaraR5Module:
+@dataclass
+class SaraR5ModuleState:
+
     """
-    Represents a u-blox SARA-R5 module.
+    Represents the state of the SaraR5Module.
+
+    example usage:
+    module_state = SaraR5ModuleState()
+    module_state.psd.update({"ip": "1.2.3.4", "is_active": True})
+
+    """
+    imei: str = None
+    iccid: str = None
+    psd: dict = field(default_factory=dict)
+    signalling_cx_status: bool = False
+    registration_status: 'SaraR5Module.EPSNetRegistrationStatus' = None
+    radio_status: dict = field(default_factory=dict)
+    radio_stats: dict = field(default_factory=dict)
+    logger: logging.Logger = field(default=logging.getLogger(__name__))
+
+    parameter_names = {
+        'imei': 'IMEI',
+        'iccid': 'ICCID',
+        'psd': 'Packet Switched Data',
+        'signalling_cx_status': 'Signalling Connection Status',
+        'registration_status': 'Registration Status',
+        'radio_status': 'Radio Status',
+        'radio_stats': 'Radio Statistics'
+    }
+
+    def state_change(self, parameter_name, old_value, new_value):
+        human_friendly_name = self.parameter_names.get(parameter_name, parameter_name)
+        self.logger.debug(f"Module state: {human_friendly_name} changed from {old_value} to {new_value}")
+
+    def __setattr__(self, name, value):
+        if name in self.__dict__:
+            old_value = self.__dict__[name]
+            if old_value != value:
+                self.state_change(name, old_value, value)
+        super().__setattr__(name, value)
+
+
+class SaraR5SerialConfig:
+    """
+    Represents the serial configuration for the SaraR5Module.
 
     Args:
         serial_port (str): The serial port to communicate with the module.
         baudrate (int, optional): The baudrate for the serial communication. Defaults to 115200.
         rtscts (bool, optional): Enable RTS/CTS flow control. Defaults to False.
-        roaming (bool, optional): Enable roaming. Defaults to False.
-        echo (bool, optional): Enable echo. Defaults to True.
+    """
+    serial_port: str
+    baudrate: int = 115200
+    rtscts: bool = True
+
+@dataclass
+class SaraR5ModuleConfig:
+        # def setup(self, mno_profile, apn, power_saving_mode=False, tau:PSMPeriodicTau=None, 
+        #       active_time:PSMActiveTime=None):
+    mno_profile: MobileNetworkOperator
+    apn: str
+    echo: bool = False
+    roaming: bool = False
+    power_saving_mode: bool = False
+    tau: PSMPeriodicTau = None
+    active_time: PSMActiveTime = None
+    registration_status_reporting: 'SaraR5Module.EPSNetRegistrationReportConfig' = None
+
+class SaraR5Module:
+    """
+    Represents a u-blox SARA-R5 module.
+
+    Args:
         power_toggle (Callable[[], None], optional): A function to toggle the power of the module. 
             Provide a function which toggles the GPIO to which PWR_ON pin of the module is connected
             using the required timing described in the datasheet. Defaults to None.
@@ -334,44 +436,6 @@ class SaraR5Module:
         REGISTERED_AND_ROAMING = 5
         EMERGENCY_BEARER_ONLY = 8
 
-    class MobileNetworkOperator(Enum):
-        """
-        Represents the mobile network operator.
-
-        AT Command: AT+UMNOPROF=<MobileNetworkOperator>
-        """
-        UNDEFINED_REGULATORY = 0
-        SIM_ICCID_IMSI_SELECT = 1
-        AT_AND_T = 2
-        VERIZON = 3
-        TELSTRA = 4
-        T_MOBILE_US = 5
-        CHINA_TELECOM = 6
-        SPRINT = 8
-        VODAFONE = 19
-        NTT_DOCOMO = 20
-        TELUS = 21
-        SOFTBANK = 28
-        DEUTSCHE_TELEKOM = 31
-        US_CELLULAR = 32
-        VIVO = 33
-        LG_U_PLUS = 38
-        SKT = 39
-        KDDI = 41
-        ROGERS = 43
-        CLARO_BRASIL = 44
-        TIM_BRASIL = 45
-        ORANGE_FRANCE = 46
-        BELL = 47
-        GLOBAL = 90
-        STANDARD_EUROPE = 100
-        STANDARD_EUROPE_NO_EPCO = 101
-        STANDARD_JP_GLOBAL = 102
-        AT_AND_T_2_4_12 = 198
-        GENERIC_VOICE_CAPABLE_AT_AND_T = 199
-        GCF_PTCRB = 201
-        FIRSTNET = 206
-
     class PSDProtocolType(Enum):
         """
         Represents the PSD protocol type.
@@ -471,8 +535,12 @@ class SaraR5Module:
         PSM_BLOCKED = 2
         PARTIAL_PSM_CLIENT_BLOCKING = 3
 
-    def __init__(self, serial_port: str, baudrate=115200, rtscts=False,
-                 roaming=False, echo=True, power_control: type = PowerControl, logger=None, tx_rx_logger=None):
+    def __init__(self, 
+                 serial_config:SaraR5SerialConfig,
+                 module_config:SaraR5ModuleConfig, 
+                 power_control: type = PowerControl, 
+                 logger=None, 
+                 tx_rx_logger=None):
         
         self.logger = logger or logging.getLogger(__name__)
         if logger is None:
@@ -484,13 +552,16 @@ class SaraR5Module:
             self.tx_rx_logger.setLevel(logging.DEBUG)
             self.tx_rx_logger.addHandler(logging.StreamHandler())
 
-        self._serial_port = serial_port
-        self._serial = serial.Serial(self._serial_port, baudrate=baudrate,
-                                     rtscts=rtscts,bytesize=8,parity='N',
+        self.serial_config = serial_config
+        self.module_config = module_config
+        self.module_state = SaraR5ModuleState(logger=self.logger)
+
+        self._serial = serial.Serial(self.serial_config.serial_port, baudrate=self.serial_config.baudrate,
+                                     rtscts=self.serial_config.rtscts,bytesize=8,parity='N',
                                      stopbits=1,timeout=5)
         self.power_control:PowerControl = power_control(logger=self.logger)
+
         self.serial_read_queue = queue.Queue()
-        self.echo = echo
         self.at_cmd_handler = AT_Command_Handler(self.serial_read_queue, self._write_serial_and_log, logger=self.logger)
         self.psm_state = SaraR5Module.PSMState.PSM_INACTIVE
 
@@ -498,28 +569,16 @@ class SaraR5Module:
 
         self.read_uart_thread = threading.Thread(target=self._read_from_uart)
         self.read_uart_thread.daemon = True
-        # self.read_vin_thread = threading.Thread(target=self._read_vin_loop)
-        # self.read_vin_thread.daemon = True
-                                            
 
-        self.imei = None
-        self.iccid = None
-        self.psd = {}
-        self.signalling_cx_status = False
-        self.registration_status = SaraR5Module.EPSNetRegistrationStatus.NOT_REGISTERED
-        self.registration_status_config:SaraR5Module.EPSNetRegistrationReportConfig = None
-        self.roaming = roaming
-        self.ip = None
 
-        self.current_rat = None
+
 
         self.sockets = {}
         self.http_profiles = {}
         self.security_profiles = {}
         self.mqtt_client = MQTTClient(self)
 
-        self.radio_status = None
-        self.radio_stats = None
+
 
         self.urc_mappings = {
             "+CEREG":  self.handle_cereg,
@@ -624,19 +683,15 @@ class SaraR5Module:
             else:
                 raise ModuleNotRespondingError("Module not responding, tried %s hard resets and %s power cycles" % (hard_reset_count, power_cycles_count))
 
-    def setup(self, mno_profile, apn, power_saving_mode=False, tau:PSMPeriodicTau=None, 
-              active_time:PSMActiveTime=None):
+    def setup(self):
         """
-        Sets up the module with the specified Mobile Network Operator profile and APN.
+        Sets up the module with the SaraR5ModuleConfig.
 
-        Args:
-            mno_profile: The MNO profile to use.
-            apn: The APN to use.
         """
         #TODO: support manually connecting to specific operator
         #TODO: support NB-IoT
         cid_profile_id, psd_profile_id = 1, 0 #TODO: support multiple profiles
-        self.at_set_echo(False)
+        self.at_set_echo(self.module_config.echo)
         self.at_set_power_saving_uart_mode(SaraR5Module.PowerSavingUARTMode.DISABLED)
         self.at_set_error_format(SaraR5Module.ErrorFormat.VERBOSE) # verbose format
         
@@ -653,34 +708,35 @@ class SaraR5Module:
         # in case module had protocol stack disabled, need CFUN=126 before CFUN=1
         self.at_set_module_functionality(SaraR5Module.ModuleFunctionality.RESTORE_PROTOCOL_STACK)
         self.at_set_module_functionality(SaraR5Module.ModuleFunctionality.MINIMUM_FUNCTIONALITY)
-        if power_saving_mode is True:
+        if self.module_config.power_saving_mode is True:
             #disable lwm2m client so doesn't block psm
             self.at_set_lwm2m_activation(False)
 
-        self.at_set_mno_profile(mno_profile)
+        self.at_set_mno_profile(self.module_config.mno_profile)
         self._await_iccid()
-        self.at_set_pdp_context(cid_profile_id, SaraR5Module.PDPType.IPV4, apn)
+        self.at_set_pdp_context(cid_profile_id, SaraR5Module.PDPType.IPV4, self.module_config.apn)
         self.at_set_module_functionality(SaraR5Module.ModuleFunctionality.FULL_FUNCTIONALITY)
-        self.at_set_eps_network_reg_status(
-            SaraR5Module.EPSNetRegistrationReportConfig.ENABLED_WITH_LOCATION_AND_PSM)
-        self._await_connection(roaming=False, timeout=60)
+       # self.at_set_eps_network_reg_status(
+       #     SaraR5Module.EPSNetRegistrationReportConfig.ENABLED_WITH_LOCATION_AND_PSM)
+        self.at_set_eps_network_reg_status(self.module_config.registration_status_reporting)
+        self._await_registration(timeout=60)
         self.at_set_psd_protocol_type(psd_profile_id, SaraR5Module.PSDProtocolType.IPV4)
         self.at_set_psd_to_cid_mapping(psd_profile_id, cid_profile_id)
         self.at_get_psd_profile_status(psd_profile_id, SaraR5Module.PSDParameters.ACTIVATION_STATUS)
-        if not self.psd["is_active"]:
+        if not self.module_state.psd["is_active"]:
             self.at_psd_action(psd_profile_id, SaraR5Module.PSDAction.ACTIVATE)
 
         self.at_set_edrx(EDRXMode.DISABLED)
-        self.at_set_power_saving_mode_urc(power_saving_mode)
+        self.at_set_power_saving_mode_urc(self.module_config.power_saving_mode)
         self.at_set_signalling_cx_urc(
-            SaraR5Module.SignalCxReportConfig.ENABLED_MODE_ONLY if power_saving_mode
+            SaraR5Module.SignalCxReportConfig.ENABLED_MODE_ONLY if self.module_config.power_saving_mode
             else SaraR5Module.SignalCxReportConfig.DISABLED)
 
         self.at_store_current_configuration()
 
         self.at_set_psm_mode(
-            SaraR5Module.PSMMode.ENABLED if power_saving_mode else SaraR5Module.PSMMode.DISABLED,
-            periodic_tau=tau, active_time=active_time)
+            SaraR5Module.PSMMode.ENABLED if self.module_config.power_saving_mode else SaraR5Module.PSMMode.DISABLED,
+            periodic_tau=self.module_config.tau, active_time=self.module_config.active_time)
 
     def close(self):
         """
@@ -718,9 +774,9 @@ class SaraR5Module:
     def register_after_wake(self):
         self.at_set_module_functionality(SaraR5Module.ModuleFunctionality.RESTORE_PROTOCOL_STACK)
         self.at_set_module_functionality(SaraR5Module.ModuleFunctionality.FULL_FUNCTIONALITY)
-        self._await_connection(timeout=60)
+        self._await_registration(timeout=60)
         self.at_get_psd_profile_status(0, SaraR5Module.PSDParameters.ACTIVATION_STATUS)
-        if not self.psd["is_active"]:
+        if not self.module_state.psd["is_active"]:
             self.at_psd_action(0, SaraR5Module.PSDAction.ACTIVATE)   
 
     def prep_for_sleep(self):
@@ -854,9 +910,9 @@ class SaraR5Module:
         radio_data = self.at_get_radio_statistics()
         self._parse_radio_stats(radio_data)
 
-    def _await_connection(self, roaming=False, polling_interval=2, timeout=180):
+    def _await_registration(self, polling_interval=2, timeout=180):
         """
-        Continuously poll the connection status and see if the connection status has changed.
+        Continuously poll the carrier registration status and see if the connection status has changed.
 
         Args:
             roaming (bool, optional): Flag indicating whether roaming is enabled or not.
@@ -870,23 +926,23 @@ class SaraR5Module:
                 established within the specified timeout.
 
         """
-        self.logger.info('Awaiting Connection')
+        self.logger.info('Awaiting Carrier Registration')
         start_time = time.time()
         while True:
 
             self.at_get_eps_network_reg_status() #triggers URC
 
-            if (not roaming) and self.registration_status == \
+            if (not self.module_config.roaming) and self.module_state.registration_status == \
                 SaraR5Module.EPSNetRegistrationStatus.REGISTERED_HOME_NET:
                 break
 
-            if roaming and self.registration_status == \
+            if self.module_config.roaming and self.module_state.registration_status == \
             SaraR5Module.EPSNetRegistrationStatus.REGISTERED_AND_ROAMING:
                 break
 
             elapsed_time = time.time() - start_time
             if elapsed_time > timeout:
-                raise ConnectionTimeoutError(f'Could not connect in {timeout} seconds')
+                raise ConnectionTimeoutError(f'Could not register in {timeout} seconds')
             
             time.sleep(polling_interval)
 
@@ -912,8 +968,9 @@ class SaraR5Module:
             except CMEError as e:
                 self.logger.warning(e)
 
-            if self.iccid:
-                self.logger.info('ICCID: %s', self.iccid)
+            iccid = self.module_state.iccid
+            if iccid:
+                self.logger.info('ICCID: %s', iccid)
                 break
 
             elapsed_time = time.time() - start_time
@@ -958,8 +1015,8 @@ class SaraR5Module:
 
     def at_read_sim_iccid(self):
         result = self.send_command('AT+CCID?')
-        self.iccid = int(result[0])
-        return self.iccid
+        self.module_state.iccid = int(result[0])
+        return self.module_state.iccid
 
     def at_read_imei(self):
         """
@@ -969,8 +1026,9 @@ class SaraR5Module:
             int: The IMEI number.
         """
         result = self.send_command('AT+CGSN=1')
-        self.imei = int(result[0])
-        return self.imei
+        imei = int(result[0])
+        self.module_state.imei = imei
+        return imei
 
 
 # Networking / radio config
@@ -1027,7 +1085,7 @@ class SaraR5Module:
             config (EPSNetworkRegistrationReportConfig): The configuration value to set.
         """
         self.send_command(f'AT+CEREG={config.value}', expected_reply=False)
-        self.registration_status_config=config
+
         self.logger.info('%s set to %s', config.name, config.value)
 
     def at_set_module_functionality(self, function: ModuleFunctionality, reset: bool = None):
@@ -1184,14 +1242,16 @@ class SaraR5Module:
         response_list = self.send_command(f'AT+UPSND={profile_id},{parameter.value}')
 
         if parameter == SaraR5Module.PSDParameters.IP_ADDRESS:
-            self.psd["ip"] = response_list[2]
-            self.logger.info('PSD Profile %s IP Address is %s',profile_id,self.psd["ip"])
-            return self.psd["ip"]
+            ip = response_list[2]
+            self.module_state.psd.update({"ip": ip}) 
+            self.logger.info('PSD Profile %s IP Address is %s',profile_id,ip)
+            return ip
 
         if parameter == SaraR5Module.PSDParameters.ACTIVATION_STATUS:
-            self.psd["is_active"] = bool(int(response_list[2]))
-            self.logger.info('PSD Profile %s Activation Status is %s', profile_id, self.psd["is_active"])
-            return self.psd["is_active"]
+            is_active = bool(int(response_list[2]))
+            self.module_state.psd.update({"is_active": is_active}) 
+            self.logger.info('PSD Profile %s Activation Status is %s', profile_id, is_active)
+            return is_active
 
         return None
 
@@ -1526,9 +1586,9 @@ class SaraR5Module:
             translated_stats['avg_rsrp'] = int(translated_stats['avg_rsrp']) - 141
         translated_stats['RSRQ'] = translate_rsrq(translated_stats['RSRQ'])
 
-        self.radio_status=translated_meta
-        self.radio_stats=translated_stats
-        return self.radio_status, self.radio_stats
+        self.module_state.radio_status.update(translated_meta)
+        self.module_state.radio_stats.update(translated_stats)
+        return self.module_state.radio_status, self.module_state.radio_stats
 
     @staticmethod
     def validate_filename(filename):
@@ -1706,8 +1766,7 @@ class SaraR5Module:
             data (str): The data received from the UUPSDD message.
         """
         data = int(data.rstrip('\r\n').strip())
-        self.psd["is_active"] = False
-        self.psd["ip"] = None
+        self.module_state.psd.update({"is_active": False, "ip": None})
         self.logger.info('PSD Profile is inactive')
 
     def handle_uupsda(self, data):
@@ -1718,12 +1777,14 @@ class SaraR5Module:
             data (str): The UUPSDA message data.
         """
         data = data.rstrip('\r\n').split(",")
-        self.psd["is_active"] = not bool(int(data[0]))
-        logger_str = 'MODULE: PSD Profile is active ' if self.psd["is_active"] \
+        is_active = not bool(int(data[0]))
+        self.module_state.psd.update({"is_active": is_active})
+        logger_str = 'MODULE: PSD Profile is active ' if is_active \
             else 'MODULE: PSD Profile is inactive'
         if len(data) > 1:
-            self.psd["ip"] = data[1].strip('"')
-        self.logger.info('%s and has ip: %s', logger_str, self.psd["ip"])
+            ip = data[1].strip('"')
+            self.module_state.psd.update({"ip": ip})
+        self.logger.info('%s and has ip: %s', logger_str, ip)
 
     def handle_cereg(self, data):
         """
@@ -1747,11 +1808,11 @@ class SaraR5Module:
         if len(data) == 1:
             mode = "URC" # if there's only one parameter it's a URC because min 2 
                          # parameters in a read response
-        elif self.registration_status_config == SaraR5Module.EPSNetRegistrationReportConfig.DISABLED:
+        elif self.module_config.registration_status_reporting == SaraR5Module.EPSNetRegistrationReportConfig.DISABLED:
             mode = "Read" # no URC if it's disabled
-        elif int(data[0]) != self.registration_status_config.value:
+        elif int(data[0]) != self.module_config.registration_status_reporting.value:
             mode = "URC" # if 1st parameter doesn't match config it's a URC
-        elif self.registration_status_config == SaraR5Module.EPSNetRegistrationReportConfig.ENABLED:
+        elif self.module_config.registration_status_reporting == SaraR5Module.EPSNetRegistrationReportConfig.ENABLED:
             mode = "Read" # if 1st parameter matches config and is 1, since there's at least 2 params
                           # it's a read
         elif int(data[0]) != SaraR5Module.EPSNetRegistrationStatus.REGISTERED_AND_ROAMING:
@@ -1798,18 +1859,15 @@ class SaraR5Module:
             if key == "rac_or_mme":
                 parsed_result[key] = str(value)
 
-        if self.registration_status != parsed_result["registration_status"]:
+        if self.module_state.registration_status != parsed_result["registration_status"]:
             self.logger.info("MODULE: Registration status changed from %s to %s",
                         self.registration_status.name, parsed_result['registration_status'].name)
-        self.registration_status = parsed_result["registration_status"]
+        self.module_state.registration_status = parsed_result["registration_status"]
 
     def handle_cscon(self, data):
         data = data.rstrip('\r\n').split(",")
         signalling_cs_status = bool(int(data[0]))
-        if signalling_cs_status != self.signalling_cx_status:
-            self.logger.info('MODULE: Signalling connection status changed from %s to %s',
-                        self.signalling_cx_status, signalling_cs_status)
-        self.signalling_cx_status = signalling_cs_status
+        self.module_state.signalling_cx_status = signalling_cs_status
         #TODO: parse state and access
 
     def handle_uupsmr(self, data):
@@ -1840,5 +1898,5 @@ class SaraR5Module:
         self.logger.info('Stored current configuration to profile %s', profile_id)
 
     def __repr__(self):
-        return f'IoTModule(serial_port="{self._serial_port}")'
+        return f'IoTModule(serial_port="{self.serial_config.serial_port}")'
     
