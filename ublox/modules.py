@@ -292,14 +292,12 @@ class SaraR5SerialConfig:
     serial_port: str
     baudrate: int = 115200
     rtscts: bool = True
+    echo: bool = False
 
 @dataclass
 class SaraR5ModuleConfig:
-        # def setup(self, mno_profile, apn, power_saving_mode=False, tau:PSMPeriodicTau=None, 
-        #       active_time:PSMActiveTime=None):
     mno_profile: MobileNetworkOperator
     apn: str
-    echo: bool = False
     roaming: bool = False
     power_saving_mode: bool = False
     tau: PSMPeriodicTau = None
