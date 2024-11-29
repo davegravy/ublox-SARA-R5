@@ -112,7 +112,7 @@ class AT_Command_Handler():
         self.output_fn(self._command_bytes(terminated=True))
         timestamp_write = datetime.datetime.now()
         timestamp_write_str = timestamp_write.strftime("%Y-%m-%d_%H-%M-%S")
-        self.logger.debug('Sent:%s          %s: %s', chr(10), timestamp_write_str, self._command_bytes(terminated=True))
+        #self.logger.debug('Sent:%s          %s: %s', chr(10), timestamp_write_str, self._command_bytes(terminated=True))
 
         self.got_reply = True if not self.expected_reply_bytes else False
         self.got_ok = False
@@ -197,7 +197,7 @@ class AT_Command_Handler():
     def _log_debug_info(self):
         debug_str = [f'{timestamp.strftime("%Y-%m-%d_%H-%M-%S")}: {response}' for timestamp, response in self.debug_log]
         debug_output = '\n          '.join(debug_str)
-        self.logger.debug('Received:%s          %s', chr(10), debug_output)
+        #self.logger.debug('Received:%s          %s', chr(10), debug_output)
 
 class SaraR5Module:
     """
@@ -550,7 +550,7 @@ class SaraR5Module:
 
         Args:
             retry_threshold (int, optional): The maximum number of retries. Defaults to 5.
-            clean (bool, optional): If True, a full module power down is first performed. Defaults to False.
+            clean (bool, optional): If True, a full module power down is first performed followed by soft reset. Defaults to False.
             
         Raises:
             Exception: If the module does not respond.
@@ -570,6 +570,7 @@ class SaraR5Module:
                 success = self.power_control.await_power_state(False, timeout=30)
                 if not success: self.logger.warning("Power OFF failed, retrying")
                 time.sleep(1)  # wait before retrying
+            self.logger.info("Power OFF successful")
 
         while True:
             self.logger.info("Powering ON the module")
@@ -577,7 +578,10 @@ class SaraR5Module:
             while not success:
                 self.power_control.power_on_wake()
                 success = self.power_control.await_power_state(True, timeout=30)
-                if not success: self.logger.warning("Power ON failed, retrying")
+                if not success: 
+                    self.logger.warning("Power ON failed, retrying")
+                else: 
+                    self.logger.info("Power ON successful")
                 time.sleep(1)  # wait before retrying
 
             time.sleep(3)  # wait for boot
@@ -593,7 +597,12 @@ class SaraR5Module:
                     responding = False
 
             if responding:
+                if clean:
+                    self.at_set_module_functionality(SaraR5Module.ModuleFunctionality.SILENT_RESET)
+                    time.sleep(2)
                 break
+            
+            clean = True #if not responding we should treat this as a clean restart 
 
             # if not responding, try hard resets until retry_thredhold then try power cycles until retry_threshold
             
@@ -630,10 +639,15 @@ class SaraR5Module:
         self.at_set_echo(False)
         self.at_set_power_saving_uart_mode(SaraR5Module.PowerSavingUARTMode.DISABLED)
         self.at_set_error_format(SaraR5Module.ErrorFormat.VERBOSE) # verbose format
+        
         #TODO: write functions for the below two items
         #self.send_command("AT+UPSMVER=24", expected_reply=False)
         #self.send_command("AT+CFUN=16", expected_reply=False)
-        self.serial_init()
+        #self.serial_init()
+        #self.at_set_echo(False)
+        #self.at_set_power_saving_uart_mode(SaraR5Module.PowerSavingUARTMode.DISABLED)
+        #self.at_set_error_format(SaraR5Module.ErrorFormat.VERBOSE) # verbose format
+        
         self.at_read_imei()
 
         # in case module had protocol stack disabled, need CFUN=126 before CFUN=1
@@ -688,6 +702,7 @@ class SaraR5Module:
 
     def wake_from_sleep(self):
         self.serial_init()
+        
         #TODO: call function self.restore_NVM(). Track non-volatile settings in module class and restore them to device from this function    
         #e.g. MQTT settings, security profiles, etc
         self.at_set_power_saving_uart_mode(SaraR5Module.PowerSavingUARTMode.DISABLED)
@@ -695,6 +710,7 @@ class SaraR5Module:
         self.at_set_error_format(SaraR5Module.ErrorFormat.VERBOSE) # verbose format
         self.at_set_eps_network_reg_status(
              SaraR5Module.EPSNetRegistrationReportConfig.ENABLED_WITH_LOCATION_AND_PSM)
+        self.at_get_eps_network_reg_status()
         self.mqtt_client.at_set_mqtt_nonvolatile(MQTTClient.NonVolatileOption.RESTORE_FROM_NVM)
 
         
@@ -709,7 +725,7 @@ class SaraR5Module:
 
     def prep_for_sleep(self):
         self.at_set_power_saving_uart_mode(SaraR5Module.PowerSavingUARTMode.ENABLED,
-                                            timeout=250)
+                                            timeout=40)
 
 
 # Client profile management
@@ -817,8 +833,11 @@ class SaraR5Module:
         Args:
             except_files (list, optional): A list of files to exclude from deletion. Defaults to None.
         """
-        self.logger.info(f'Deleting all files on module{ 'except ' + except_files if except_files else ''}.')
+        self.logger.info(f'Deleting all files on module{ " except " + ", ".join(except_files) if except_files else ""}.')
         files = self.at_list_files()
+        if files == ['']:
+            self.logger.info('No files to delete on module.')
+            return
         for file in files:
             if except_files and file in except_files:
                 continue
@@ -1326,6 +1345,7 @@ class SaraR5Module:
             A list of filenames.
         """
         result = self.send_command('AT+ULSTFILE=0', expected_reply=True)
+        result = [item.strip('"') for item in result]
         return result
 
     def at_get_filesystem_free_space(self):

@@ -109,16 +109,16 @@ class AT91PowerControl(PowerControl):
         return self.gpio_v_int.get()
 
     def await_power_state(self, target_state, timeout=30):
-        self.logger.debug(f"Awaiting power state. target_state: {target_state} timeout: {timeout}")
         if self.get_power_state() == target_state:
             return True
+        self.logger.debug(f"Awaiting V_INT, state: {target_state} timeout: {timeout}")
         #burn one to clear past edges
         self.gpio_v_int.poll(edge=GPIO.RISING if target_state else GPIO.FALLING, timeout=0.01)
         result = self.gpio_v_int.poll(edge=GPIO.RISING if target_state else GPIO.FALLING, timeout=timeout)
         success = GPIO.RISING if target_state else GPIO.FALLING
         if result == success:
             current_state = self.get_power_state()
-            self.logger.debug(f"current state: {current_state}, target_state: {target_state}")
+            self.logger.debug(f"current V_INT state: {current_state}, target V_INT state: {target_state}")
             return current_state == target_state
 
     def power_on_wake(self):

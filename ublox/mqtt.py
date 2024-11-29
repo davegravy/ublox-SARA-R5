@@ -486,8 +486,10 @@ class MQTTCommandHandler:
             raise ValueError("topic must be 256 characters or less")
         if len(message) > 1024:
             raise ValueError("message must be 1024 characters or less")
+        
+        hex_message = message.encode('utf-8').hex().upper()
 
-        self._module.send_command(f'AT+UMQTTC=2,{qos.value},{retain.value},0,"{topic}","{message}"', expected_reply=False)
+        self._module.send_command(f'AT+UMQTTC=2,{qos.value},{retain.value},1,"{topic}","{hex_message}"', expected_reply=False)
 
     def at_mqtt_publish_file(self, topic: str, send_filename: str, qos: QoSLevel=QoSLevel.AT_MOST_ONCE, retain: Retain=Retain.NOT_RETAIN):
         """
