@@ -566,6 +566,7 @@ class MQTTCommandHandler:
 
         # Combine all lines into one string and decode from bytes
         raw_message = b''.join(message_data)
+        self._module.logger.debug("Raw MQTT message: %s", raw_message)
         
         # Use regex to match the initial metadata
         match = re.match(rb'\+UMQTTC: 6,(\d+),(\d+),(\d+),"([^"]+)",(\d+),"(.*)"', raw_message, re.DOTALL)

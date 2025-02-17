@@ -16,7 +16,7 @@ class PowerControl(ABC):
         await_power_state(target_state, timeout=30): Waits for the module to reach the target power state within the specified timeout.
         power_on_wake(): Powers on or wakes up the module.
         force_power_off(): Forces the module to power off.
-        force_power_off_alt(): An alternative method to force the module to power off.
+        force_power_off_R520(): The R520 method to force the module to power off.
         hard_reset(): Performs a hard reset on the module.
         close(): Closes the GPIO instances.
         _config_gpio_bias(): Configures the GPIO bias settings.
@@ -39,11 +39,15 @@ class PowerControl(ABC):
         pass
 
     @abstractmethod
+    def power_on_wake_R520(self):
+        pass
+
+    @abstractmethod
     def force_power_off(self):
         pass
 
     @abstractmethod
-    def force_power_off_alt(self):
+    def force_power_off_R520(self):
         pass
 
     @abstractmethod
@@ -139,6 +143,27 @@ class AT91PowerControl(PowerControl):
         time.sleep(0.25)
         success = self.get_power_state() == True
         return success
+    
+    def power_on_wake_R520(self):
+        """
+        Powers on the device if it is not already powered on.
+        Returns:
+            bool: True if the device is successfully powered on, False otherwise.
+        """
+
+        power_state = self.get_power_state()
+
+        if power_state:
+            self.logger.info("Power ON/Wake requested, already on")
+            return power_state
+        self.logger.info("Power ON/Wake requested, powering on")
+
+        on_time_max = 1.5 #seconds
+
+        self.gpio_pwr_on.set(True)
+        success = self.await_power_state(True, on_time_max + 0.5)
+        self.gpio_pwr_on.set(False)
+        return success
 
     def force_power_off(self):
         """
@@ -169,9 +194,9 @@ class AT91PowerControl(PowerControl):
         success = self.get_power_state() == False
         return success
 
-    def force_power_off_alt(self):
+    def force_power_off_R520(self):
         """
-        An alternative method to force the power off sequence for the device.
+        Forces the power off sequence for the device using the R520 method.
         Returns:
             bool: True if the device was successfully powered off, False otherwise.
         """
@@ -182,13 +207,22 @@ class AT91PowerControl(PowerControl):
             self.logger.info("Force power OFF requested, already off")
             return True
 
-        self.logger.info("Force power OFF requested, powering off (ALT method)")
-        self.logger.debug("setting pwr_on to 0")
+        normal_off_time_max = 1.5 #seconds
+        emergency_off_time_max = 17 #seconds
+        
         self.gpio_pwr_on.set(True)
-        time.sleep(4.25)
-        self.logger.debug("setting pwr_on to 1")
-        self.gpio_pwr_on.set(False)
-        success = self.get_power_state() == False
+        start_time = time.time()
+        success = self.await_power_state(False, normal_off_time_max + 0.5)
+        if success:
+            self.gpio_pwr_on.set(False)
+            return True
+        
+        self.logger.warning("Normal power off failed, attempting emergency power off")
+        elapsed_time = time.time() - start_time
+        remaining_time = (emergency_off_time_max + 0.5) - elapsed_time  
+        if remaining_time > 0:            
+            success = self.await_power_state(False, remaining_time)
+
         return success
 
     def hard_reset(self):

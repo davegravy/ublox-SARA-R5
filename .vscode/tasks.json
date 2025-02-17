@@ -2,9 +2,9 @@
     "version": "2.0.0",
     "tasks": [
         {
-            "label": "deploy",
+            "label": "deploy-D2",
             "type": "shell",
-            "command": "eval \"$(ssh-agent -s)\" && ssh-add ~/.ssh/me3 && rsync -avz -e 'ssh -p 1022' ./ root@cellmodem.davegrant.ca:/root/ublox-SARA-R5 && ssh root@cellmodem.davegrant.ca -p 1022 'fuser -k /dev/ttyS1 & python3 /root/ublox-SARA-R5/ublox/tests/test.py'",
+            "command": "eval \"$(ssh-agent -s)\" && ssh-add ~/.ssh/me3 && rsync -avz -e 'ssh -p 1022' ./ root@cellmodem.davegrant.ca:/root/ublox-SARA-R5 && ssh root@cellmodem.davegrant.ca -p 1022 'cp ~/ublox-SARA-R5 ~/glowflye/ -r'",
             "problemMatcher": [],
             "group": {
                 "kind": "build",
@@ -12,14 +12,24 @@
             }
         },
         {
-            "label": "deploy-integration",
+            "label": "deploy-all",
             "type": "shell",
-            "command": "eval \"$(ssh-agent -s)\" && ssh-add ~/.ssh/me3 && rsync -avz -e 'ssh -p 1022' ./ root@cellmodem.davegrant.ca:/root/ublox-SARA-R5 && ssh root@cellmodem.davegrant.ca -p 1022 'cp ~/ublox-SARA-R5 ~/glowflye/ -r'",
+            "command": "./.vscode/deploy-all.sh ${input:serverList}",
             "problemMatcher": [],
             "group": {
                 "kind": "build",
                 "isDefault": false
             }
+        }       
+    ],
+    "inputs": [
+        {
+            "id": "serverList",
+            "type": "pickString",
+            "description": "Enter a space-separated list of servers (e.g., root@cellmodem.davegrant.ca:1022 root@16el.davegrant:22201 ...)",
+            "options":["root@99.210.31.47:1022",
+                      "root@16el.davegrant.ca:22201 root@16el.davegrant.ca:22202 root@16el.davegrant.ca:22203"]
+       
         }
     ]
 }

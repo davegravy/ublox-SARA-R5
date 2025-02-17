@@ -36,6 +36,7 @@ import time
 import serial
 import validators
 import errno
+import select
 
 
 from ublox.http import HTTPClient
@@ -148,9 +149,9 @@ class AT_Command_Handler():
         self._validate()
         self._prepare_expected_reply()
 
-        self.output_fn(self._command_bytes(terminated=True))
-        timestamp_write = datetime.datetime.now()
-        timestamp_write_str = timestamp_write.strftime("%Y-%m-%d_%H-%M-%S")
+        self.command_send_time = self.output_fn(self._command_bytes(terminated=True))
+        
+        #timestamp_write_str = self.command_send_time.strftime("%Y-%m-%d_%H-%M-%S")
         #self.logger.debug('Sent:%s          %s: %s', chr(10), timestamp_write_str, self._command_bytes(terminated=True))
 
         self.got_reply = True if not self.expected_reply_bytes else False
@@ -160,13 +161,16 @@ class AT_Command_Handler():
         self.timeout_time = time.time() + timeout
 
         try:
+            if self.input_data is not None:
+                self.logger.debug(f"send_cmd with input data, timeout is in {self.timeout_time - time.time()} seconds")
             while not time.time() > self.timeout_time:
                 if self.got_ok and self.got_reply and self.input_data is None:
                     break
-                response = self._get_response()
-                self._process_response(response)
-                if input_data and response.startswith(b">"):
-                    self.output_fn(self.input_data)
+                response, timestamp_read = self._get_response()
+                self._process_response(response, timestamp_read)
+                if self.input_data and response and response.startswith(b">"):                    
+                    write_timeout = self.timeout_time - time.time()
+                    self.output_fn(self.input_data,timeout=write_timeout)
                     self.input_data = None
             else:   
                 self.logger.error(f"Timeout waiting for response to '{self.command_str}'. State: got_ok={self.got_ok}, got_reply={self.got_reply}, input_data={self.input_data}")
@@ -175,9 +179,14 @@ class AT_Command_Handler():
             raise e
         finally:
             self._log_debug_info()
-
+        
         return self.multiline_result if self.expected_multiline_reply else self.result
 
+    def _peek_queue(q:queue.Queue):
+        # Acquire the internal mutex so no other thread can modify the queue
+        with q.mutex:
+            # Create a shallow copy of the internal deque/list
+            return list(q.queue)
     
     def _validate(self):
         if not isinstance(self.expected_reply, (bool, str)):
@@ -196,7 +205,7 @@ class AT_Command_Handler():
         elif self.expected_reply is False:
             expected_reply_bytes = None
         elif isinstance(self.expected_reply, str):
-            expected_reply_bytes = b"+" + self.expected_reply.encode() + b":"
+            expected_reply_bytes = self.expected_reply.encode()
         self.expected_reply_bytes=expected_reply_bytes
     
     def _get_response(self):
@@ -204,18 +213,24 @@ class AT_Command_Handler():
         try:
             response, timestamp_read = self.response_queue.get(timeout=time_remaining)
             self.debug_log.append((timestamp_read, response))
-            return response
+            return response, timestamp_read
         except queue.Empty:
-            return None
+            return None, None
         
-    def _process_response(self, response):
+    def _process_response(self, response, timestamp_read):
+        #TODO: handle scenario where OK received before linefeed (bad state) 
+        if timestamp_read + datetime.timedelta(seconds=0.02) < self.command_send_time:
+            self.logger.debug(f"Timestamp read {timestamp_read} is before command send time {self.command_send_time}")
+            self.logger.debug(f"Command in progress: {self.command_str}, violating response: {response}")
+            #raise ValueError("Timestamp read is before command send time")
+            
         if response is None:
             return
         if response.startswith(b"OK"):
             self.got_ok = True
         elif self.expected_reply_bytes and response.startswith(self.expected_reply_bytes):
             self.got_reply = True
-            self.result = response.lstrip(self.expected_reply_bytes).rstrip(b"\r\n").decode().strip().split(",")
+            self.result = response[len(self.expected_reply_bytes):].rstrip(b"\r\n").decode().strip().split(",")
             self.multiline_result.append(response)
         elif response.startswith(b"ERROR"):
             raise ATError
@@ -223,7 +238,11 @@ class AT_Command_Handler():
             code = response.lstrip(b"+CME ERROR:").rstrip(b"\r\n").decode()
             #TODO: convert code to error message
             raise CMEError(code)
-        elif response == b"\r\n" or response.startswith(self._command_bytes(terminated=False)):
+        elif response == b"\r\n":
+            if self.got_ok:
+                self.logger.warning('got linefeed after OK')
+            pass
+        elif response.startswith(self._command_bytes(terminated=False)):
             pass
         elif self.input_data and response.startswith(b">"):
             # raw data input prompt, handled elsewhere
@@ -234,9 +253,10 @@ class AT_Command_Handler():
             self.logger.warning('got unexpected %s', response)
 
     def _log_debug_info(self):
-        debug_str = [f'{timestamp.strftime("%Y-%m-%d_%H-%M-%S")}: {response}' for timestamp, response in self.debug_log]
-        debug_output = '\n          '.join(debug_str)
-        #self.logger.debug('Received:%s          %s', chr(10), debug_output)
+        # debug_str = [f'{timestamp.strftime("%Y-%m-%d_%H-%M-%S-%f")}: {response}' for timestamp, response in self.debug_log]
+        # debug_output = '\n          '.join(debug_str)
+        # self.logger.debug('Received:%s          %s', chr(10), debug_output)
+        pass
 
 @dataclass
 class SaraR5ModuleState:
@@ -246,12 +266,14 @@ class SaraR5ModuleState:
 
     example usage:
     module_state = SaraR5ModuleState()
-    module_state.psd.update({"ip": "1.2.3.4", "is_active": True})
+    module_state.psd = {**self.module_state.psd, "ip": ip, "is_active": True}
 
     """
     imei: str = None
     iccid: str = None
+    model_name: str = None
     psd: dict = field(default_factory=dict)
+    psm: 'SaraR5Module.PSMState' = None
     signalling_cx_status: bool = False
     registration_status: 'SaraR5Module.EPSNetRegistrationStatus' = None
     radio_status: dict = field(default_factory=dict)
@@ -261,7 +283,9 @@ class SaraR5ModuleState:
     parameter_names = {
         'imei': 'IMEI',
         'iccid': 'ICCID',
+        'model_name': 'Model Name',
         'psd': 'Packet Switched Data',
+        'psm': 'Power Saving Mode',
         'signalling_cx_status': 'Signalling Connection Status',
         'registration_status': 'Registration Status',
         'radio_status': 'Radio Status',
@@ -269,8 +293,14 @@ class SaraR5ModuleState:
     }
 
     def state_change(self, parameter_name, old_value, new_value):
+
+        if isinstance(old_value, Enum):
+            old_value = old_value.name
+        if isinstance(new_value, Enum):
+            new_value = new_value.name
+
         human_friendly_name = self.parameter_names.get(parameter_name, parameter_name)
-        self.logger.debug(f"Module state: {human_friendly_name} changed from {old_value} to {new_value}")
+        self.logger.info(f"Module state: {human_friendly_name} changed from {old_value} to {new_value}")
 
     def __setattr__(self, name, value):
         if name in self.__dict__:
@@ -279,7 +309,7 @@ class SaraR5ModuleState:
                 self.state_change(name, old_value, value)
         super().__setattr__(name, value)
 
-
+@dataclass
 class SaraR5SerialConfig:
     """
     Represents the serial configuration for the SaraR5Module.
@@ -300,9 +330,11 @@ class SaraR5ModuleConfig:
     apn: str
     roaming: bool = False
     power_saving_mode: bool = False
+    edrx_mode: EDRXMode = EDRXMode.DISABLED
     tau: PSMPeriodicTau = None
     active_time: PSMActiveTime = None
     registration_status_reporting: 'SaraR5Module.EPSNetRegistrationReportConfig' = None
+    
 
 class SaraR5Module:
     """
@@ -346,6 +378,29 @@ class SaraR5Module:
         FAST_SAFE_POWEROFF = 10
         SILENT_RESET = 16
         RESTORE_PROTOCOL_STACK = 126
+
+    class ModulePowerMode(Enum):
+        """
+        Represents the module power mode.
+
+        AT Command: AT+CFUN?
+        """
+        ON = 1
+        MINIMUM_FUNCTIONALITY = 0
+        AIRPLANE_MODE = 4
+        MIN_FUNC_DISABLE_SIM = 19
+
+    class STK_Mode(Enum):
+        """
+        Represents the SIM Toolkit mode.
+
+        AT Command: AT+CFUN?
+        """
+        STK_DEDICATED_MODE = 6
+        STK_DISABLED_MODE_1 = 0
+        STK_DISABLED_MODE_2 = 7
+        STK_DISABLED_MODE_3 = 8
+        STK_RAW_MODE = 9
 
     class RadioAccessTechnology(Enum):
         """
@@ -556,12 +611,13 @@ class SaraR5Module:
 
         self._serial = serial.Serial(self.serial_config.serial_port, baudrate=self.serial_config.baudrate,
                                      rtscts=self.serial_config.rtscts,bytesize=8,parity='N',
-                                     stopbits=1,timeout=5)
+                                     stopbits=1,timeout=0.1)
+        self._serial_flush_event = threading.Event()
         self.power_control:PowerControl = power_control(logger=self.logger)
 
         self.serial_read_queue = queue.Queue()
         self.at_cmd_handler = AT_Command_Handler(self.serial_read_queue, self._write_serial_and_log, logger=self.logger)
-        self.psm_state = SaraR5Module.PSMState.PSM_INACTIVE
+        
 
         self.terminate = False
 
@@ -622,8 +678,8 @@ class SaraR5Module:
             self.logger.info("Powering OFF the module")
             success = False
             while not success:
-                #self.power_control.force_power_off_alt()
-                self.power_control.force_power_off()
+                #self.power_control.force_power_off()
+                self.power_control.force_power_off_R520()
                 success = self.power_control.await_power_state(False, timeout=30)
                 if not success: self.logger.warning("Power OFF failed, retrying")
                 time.sleep(1)  # wait before retrying
@@ -633,7 +689,8 @@ class SaraR5Module:
             self.logger.info("Powering ON the module")
             success = False
             while not success:
-                self.power_control.power_on_wake()
+                #self.power_control.power_on_wake()
+                self.power_control.power_on_wake_R520()
                 success = self.power_control.await_power_state(True, timeout=30)
                 if not success: 
                     self.logger.warning("Power ON failed, retrying")
@@ -642,11 +699,14 @@ class SaraR5Module:
                 time.sleep(1)  # wait before retrying
 
             time.sleep(3)  # wait for boot
-            self._reset_input_buffer()  # remove noise from any preceding power cycles
+            self._reset_input_buffers()  # remove noise from any preceding power cycles
+            self.logger.debug("here!")
 
             for _ in range(7):
                 try:
-                    self.send_command("AT", expected_reply=False, timeout=0.2)
+                    self.send_command("AT", expected_reply=False, timeout=1)
+                    self.send_command("AT+UPSV=0", expected_reply=False, timeout=1) #in case module is in power saving UART mode
+                    self.send_command("ATE0", expected_reply=False, timeout=1)
                     responding = True
                     break
                 except ATTimeoutError as e:
@@ -654,13 +714,15 @@ class SaraR5Module:
                     responding = False
 
             if responding:
-                if clean:
-                    self.at_set_module_functionality(SaraR5Module.ModuleFunctionality.SILENT_RESET)
-                    time.sleep(2)
+                wait_time = 1
+                self.logger.info(f"Module is responding, waiting {wait_time}s for RX to clear")
+                time.sleep(wait_time) #wait for any URCs to finish
+                self.logger.info("Module is responding, cleaning input buffer")
+                self._reset_input_buffers()  # start from a clean slate
+                time.sleep(wait_time)
+                self.logger.info(f"receive queue size: {self.serial_read_queue.qsize()}")
                 break
             
-            clean = True #if not responding we should treat this as a clean restart 
-
             # if not responding, try hard resets until retry_thredhold then try power cycles until retry_threshold
             
             if hard_reset_count < -1: # TODO replace with 'retry_threshold' once reset is fixed
@@ -672,14 +734,89 @@ class SaraR5Module:
                 self.logger.info("Powering OFF the module (30 second process), attempt #%s of %s", power_cycles_count, retry_threshold)
                 success = False
                 while not success:
-                    #self.power_control.force_power_off_alt()
-                    self.power_control.force_power_off()
+                    #self.power_control.force_power_off()
+                    self.power_control.force_power_off_R520()
                     success = self.power_control.await_power_state(False, timeout=30)
                     if not success: self.logger.warning("Power OFF failed, retrying")
                     time.sleep(1)  # wait before retrying
                 power_cycles_count += 1
             else:
                 raise ModuleNotRespondingError("Module not responding, tried %s hard resets and %s power cycles" % (hard_reset_count, power_cycles_count))
+            
+        self.at_set_echo(self.serial_config.echo)
+        self.at_set_power_saving_uart_mode(SaraR5Module.PowerSavingUARTMode.DISABLED) #in case module is about to enter PSM
+        self.at_set_error_format(SaraR5Module.ErrorFormat.VERBOSE) # verbose format
+
+    def refresh_state(self):
+        power_mode: SaraR5Module.ModulePowerMode
+        stk_mode: SaraR5Module.STK_Mode
+        self.logger.info('***Refreshing module state***')
+        power_mode, stk_mode = self.at_read_module_functionality()
+        self.at_get_eps_network_reg_status()
+        if power_mode == SaraR5Module.ModulePowerMode.ON \
+            and stk_mode in [SaraR5Module.STK_Mode.STK_DEDICATED_MODE, 
+                             SaraR5Module.STK_Mode.STK_RAW_MODE]:
+            self.at_get_pdp_context()
+        
+        if self.module_state.model_name.startswith("R510S"):
+            self.at_get_psd_to_cid_mapping(profile_id=0)
+            self.at_get_psd_protocol_type(profile_id=0)
+            self.at_get_psd_profile_status(profile_id=0, parameter=SaraR5Module.PSDParameters.ACTIVATION_STATUS)
+            self.at_get_psd_profile_status(profile_id=0, parameter=SaraR5Module.PSDParameters.IP_ADDRESS)
+        
+    def is_config_synced(self):
+        active_mno_profile = self.at_read_mno_profile()
+        if active_mno_profile != self.module_config.mno_profile:
+            self.logger.info("MNO profile is not synced")
+            self.logger.debug("configured MNO profile: %s, active MNO profile: %s", self.module_config.mno_profile, active_mno_profile)
+            return False
+        #TODO: PSD profile (which profile is active, how is it configured?)
+        active_edrx = self.at_read_edrx()
+        if active_edrx["mode"] != self.module_config.edrx_mode:
+            self.logger.info("eDRX mode is not synced")
+            self.logger.debug("configured eDRX mode: %s, active eDRX mode: %s", self.module_config.edrx_mode, active_edrx["mode"])
+            return False
+        #TODO: other edrx config params
+        active_power_saving_mode_urc = self.at_read_power_saving_mode_urc()
+        active_signalling_cx_urc = self.at_read_signalling_cx_urc()
+        active_lwm2m_activation = self.at_read_lwm2m_activation()
+        active_psm_mode = self.at_read_psm_mode()
+
+        if self.module_config.power_saving_mode:
+            if not active_psm_mode["mode"]:
+                self.logger.info("PSM mode is not synced")
+                self.logger.debug("configured PSM mode: %s, active PSM mode: %s", self.module_config.power_saving_mode, active_psm_mode)
+            if active_psm_mode["periodic_tau"] != self.module_config.tau:
+                self.logger.info("PSM periodic tau is not synced")
+                self.logger.debug("configured PSM periodic tau: %s, active PSM periodic tau: %s", self.module_config.tau, active_psm_mode["periodic_tau"])
+            if active_psm_mode["active_time"] != self.module_config.active_time:
+                self.logger.info("PSM active time is not synced")
+                self.logger.debug("configured PSM active time: %s, active PSM active time: %s", self.module_config.active_time, active_psm_mode["active_time"])
+            if not active_power_saving_mode_urc:
+                self.logger.info("Power saving mode URC is not synced")
+                self.logger.debug("configured power saving mode URC: %s, active power saving mode URC: %s", self.module_config.power_saving_mode, active_power_saving_mode_urc)
+                return False
+            if active_signalling_cx_urc != SaraR5Module.SignalCxReportConfig.ENABLED_MODE_ONLY:
+                self.logger.info("Signalling connection URC is not synced")
+                self.logger.debug("PSM is enabled, active signalling connection URC: %s", active_signalling_cx_urc)
+                return False
+            if active_lwm2m_activation:
+                self.logger.info("LWM2M activation is not synced")
+                self.logger.debug("PSM is enabled, active LWM2M activation: %s", active_lwm2m_activation)
+                return False
+        else:
+            if active_psm_mode["mode"]:
+                self.logger.info("PSM mode is not synced")
+                self.logger.debug("configured PSM mode: %s, active PSM mode: %s", self.module_config.power_saving_mode, active_psm_mode)
+                return False
+            
+        active_deep_sleep_mode_options = self.at_read_deep_sleep_mode_options()
+        if not active_deep_sleep_mode_options["eDRX_mode"] or not active_deep_sleep_mode_options["power_saving_mode"]:
+            self.logger.info("Deep sleep mode options are not synced")
+            self.logger.debug("active deep sleep mode options: %s",active_deep_sleep_mode_options)
+            return False
+        
+        return True
 
     def setup(self):
         """
@@ -689,52 +826,53 @@ class SaraR5Module:
         #TODO: support manually connecting to specific operator
         #TODO: support NB-IoT
         cid_profile_id, psd_profile_id = 1, 0 #TODO: support multiple profiles
-        self.at_set_echo(self.module_config.echo)
-        self.at_set_power_saving_uart_mode(SaraR5Module.PowerSavingUARTMode.DISABLED)
-        self.at_set_error_format(SaraR5Module.ErrorFormat.VERBOSE) # verbose format
-        
-        #TODO: write functions for the below two items
-        #self.send_command("AT+UPSMVER=24", expected_reply=False)
-        #self.send_command("AT+CFUN=16", expected_reply=False)
-        #self.serial_init()
-        #self.at_set_echo(False)
-        #self.at_set_power_saving_uart_mode(SaraR5Module.PowerSavingUARTMode.DISABLED)
-        #self.at_set_error_format(SaraR5Module.ErrorFormat.VERBOSE) # verbose format
-        
         self.at_read_imei()
+        self.at_read_model_name()
 
         # in case module had protocol stack disabled, need CFUN=126 before CFUN=1
         self.at_set_module_functionality(SaraR5Module.ModuleFunctionality.RESTORE_PROTOCOL_STACK)
         self.at_set_module_functionality(SaraR5Module.ModuleFunctionality.MINIMUM_FUNCTIONALITY)
-        if self.module_config.power_saving_mode is True:
-            #disable lwm2m client so doesn't block psm
-            self.at_set_lwm2m_activation(False)
 
         self.at_set_mno_profile(self.module_config.mno_profile)
         self._await_iccid()
         self.at_set_pdp_context(cid_profile_id, SaraR5Module.PDPType.IPV4, self.module_config.apn)
-        self.at_set_module_functionality(SaraR5Module.ModuleFunctionality.FULL_FUNCTIONALITY)
-       # self.at_set_eps_network_reg_status(
-       #     SaraR5Module.EPSNetRegistrationReportConfig.ENABLED_WITH_LOCATION_AND_PSM)
-        self.at_set_eps_network_reg_status(self.module_config.registration_status_reporting)
-        self._await_registration(timeout=60)
-        self.at_set_psd_protocol_type(psd_profile_id, SaraR5Module.PSDProtocolType.IPV4)
-        self.at_set_psd_to_cid_mapping(psd_profile_id, cid_profile_id)
-        self.at_get_psd_profile_status(psd_profile_id, SaraR5Module.PSDParameters.ACTIVATION_STATUS)
-        if not self.module_state.psd["is_active"]:
-            self.at_psd_action(psd_profile_id, SaraR5Module.PSDAction.ACTIVATE)
-
         self.at_set_edrx(EDRXMode.DISABLED)
         self.at_set_power_saving_mode_urc(self.module_config.power_saving_mode)
         self.at_set_signalling_cx_urc(
             SaraR5Module.SignalCxReportConfig.ENABLED_MODE_ONLY if self.module_config.power_saving_mode
             else SaraR5Module.SignalCxReportConfig.DISABLED)
+        
+        if self.module_config.power_saving_mode:
+            #disable lwm2m client so doesn't block psm
+            self.at_set_lwm2m_activation(False)
+            self.at_set_psm_mode(
+            SaraR5Module.PSMMode.ENABLED,
+            periodic_tau=self.module_config.tau, active_time=self.module_config.active_time)
+        else:
+            self.at_set_psm_mode(SaraR5Module.PSMMode.DISABLED)
+        
+        #TODO: write functions for the below two items
+        self.at_set_deep_sleep_mode_options(eDRX_mode=True, power_saving_mode=True)
 
         self.at_store_current_configuration()
+        #TODO: implement dedicated function
+        self.send_command("AT+CPWROFF", expected_reply=False)
+        self.power_control.await_power_state(False, timeout=30)
 
-        self.at_set_psm_mode(
-            SaraR5Module.PSMMode.ENABLED if self.module_config.power_saving_mode else SaraR5Module.PSMMode.DISABLED,
-            periodic_tau=self.module_config.tau, active_time=self.module_config.active_time)
+        self.wake_from_sleep()
+        self.register_after_wake()
+        #self.at_set_module_functionality(SaraR5Module.ModuleFunctionality.FULL_FUNCTIONALITY)
+        self.at_set_eps_network_reg_status(self.module_config.registration_status_reporting)
+        self._await_registration(timeout=60)
+
+        if self.module_state.model_name.startswith("R510S"):
+
+            self.at_set_psd_protocol_type(psd_profile_id, SaraR5Module.PSDProtocolType.IPV4)
+            self.at_set_psd_to_cid_mapping(psd_profile_id, cid_profile_id)
+            self.at_get_psd_profile_status(psd_profile_id, SaraR5Module.PSDParameters.ACTIVATION_STATUS)
+            if not self.module_state.psd["is_active"]:
+                self.at_psd_action(psd_profile_id, SaraR5Module.PSDAction.ACTIVATE)
+            self.at_psd_action(psd_profile_id, SaraR5Module.PSDAction.STORE)
 
     def close(self):
         """
@@ -756,28 +894,41 @@ class SaraR5Module:
 
     def wake_from_sleep(self):
         self.serial_init()
-        
+        self.at_set_eps_network_reg_status(self.module_config.registration_status_reporting) #not stored in profile
+        self.refresh_state()
         #TODO: call function self.restore_NVM(). Track non-volatile settings in module class and restore them to device from this function    
         #e.g. MQTT settings, security profiles, etc
-        self.at_set_power_saving_uart_mode(SaraR5Module.PowerSavingUARTMode.DISABLED)
-        self.at_set_lwm2m_activation(False)
-        self.at_set_error_format(SaraR5Module.ErrorFormat.VERBOSE) # verbose format
-        self.at_set_eps_network_reg_status(
-             SaraR5Module.EPSNetRegistrationReportConfig.ENABLED_WITH_LOCATION_AND_PSM)
-        self.at_get_eps_network_reg_status()
         self.mqtt_client.at_set_mqtt_nonvolatile(MQTTClient.NonVolatileOption.RESTORE_FROM_NVM)
+        if not self.module_state.model_name.startswith("R510S"):
+            return
 
+        if not self.module_state.psd["is_active"]:
+            self.at_psd_action(profile_id=0, action=SaraR5Module.PSDAction.LOAD)
+        else:
+            self.logger.warning("PSD profile is active after wake from sleep, possibly module was not asleep")
         
         
     def register_after_wake(self):
-        self.at_set_module_functionality(SaraR5Module.ModuleFunctionality.RESTORE_PROTOCOL_STACK)
-        self.at_set_module_functionality(SaraR5Module.ModuleFunctionality.FULL_FUNCTIONALITY)
+        if self.module_state.psm == SaraR5Module.PSMState.ENTERING_PSM:
+            self.at_set_module_functionality(SaraR5Module.ModuleFunctionality.RESTORE_PROTOCOL_STACK)
+            #UART power save should already be disabled if we woke from PSM
+
+        if self.module_state.model_name.startswith("R510S"):
+            self.at_set_module_functionality(SaraR5Module.ModuleFunctionality.FULL_FUNCTIONALITY)
         self._await_registration(timeout=60)
+        result = self.send_command("AT+COPS?", expected_reply=True)
+
+        if not self.module_state.model_name.startswith("R510S"):
+            return
         self.at_get_psd_profile_status(0, SaraR5Module.PSDParameters.ACTIVATION_STATUS)
         if not self.module_state.psd["is_active"]:
             self.at_psd_action(0, SaraR5Module.PSDAction.ACTIVATE)   
 
     def prep_for_sleep(self):
+        #self.send_command('AT+UPING="www.google.com"', expected_reply=False)
+        self.send_command('AT+UCPSMS?', expected_reply=True)
+        self.send_command('AT+CEDRXRDP', expected_reply=True)
+        self.at_set_lwm2m_activation(False)
         self.at_set_power_saving_uart_mode(SaraR5Module.PowerSavingUARTMode.ENABLED,
                                             timeout=40)
 
@@ -1024,9 +1175,21 @@ class SaraR5Module:
             int: The IMEI number.
         """
         result = self.send_command('AT+CGSN=1')
-        imei = int(result[0])
+        imei = int(result[0].strip('"'))
         self.module_state.imei = imei
         return imei
+
+    def at_read_model_name(self):
+        """
+        Reads the model name of the module.
+
+        Returns:
+            str: The model name.
+        """
+        result = self.send_command('ATI7',expected_reply="SARA-")
+        model_name = result[0]
+        self.module_state.model_name = model_name
+        return model_name
 
 
 # Networking / radio config
@@ -1040,6 +1203,18 @@ class SaraR5Module:
         """
         self.send_command(f'AT+UMNOPROF={profile_id.value}', expected_reply=False)
         self.logger.info('Mobile Network Operator Profile set to %s', profile_id.name)
+
+    def at_read_mno_profile(self):
+        """
+        Reads the Mobile Network Operator (MNO) profile.
+
+        Returns:
+            MobileNetworkOperator: The MNO profile.
+        """
+        result = self.send_command('AT+UMNOPROF?', expected_reply=True)
+        profile_id = MobileNetworkOperator(int(result[0]))
+        self.logger.info('Mobile Network Operator Profile: %s', profile_id.name)
+        return profile_id
 
     def at_set_band_mask(self, bands: list = None):
         """
@@ -1084,7 +1259,7 @@ class SaraR5Module:
         """
         self.send_command(f'AT+CEREG={config.value}', expected_reply=False)
 
-        self.logger.info('%s set to %s', config.name, config.value)
+        self.logger.info('EPS Network Registration Reporting set to %s', config.name)
 
     def at_set_module_functionality(self, function: ModuleFunctionality, reset: bool = None):
         """
@@ -1112,10 +1287,12 @@ class SaraR5Module:
         """
         Reads the functionality of the module.
 
-        Raises:
-            NotImplementedError: This method is not implemented yet.
         """
-        raise NotImplementedError
+        result = self.send_command('AT+CFUN?')
+        power_mode = SaraR5Module.ModulePowerMode(int(result[0]))
+        stk_mode = SaraR5Module.STK_Mode(int(result[1])) #simcard toolkit mode
+        self.logger.info('Module Functionality: %s, STK Mode: %s', power_mode.name, stk_mode.name)
+        return power_mode, stk_mode
 
     def at_set_radio_mode(self, mode:RadioAccessTechnology):
         """
@@ -1129,6 +1306,52 @@ class SaraR5Module:
         self.current_rat = mode.name
         self.logger.info('Radio Access Technology set to %s', mode.name)
         return response
+
+    def at_get_pdp_context(self):
+        """
+        Get the PDP context.
+        """
+
+        result = self.send_command('AT+CGDCONT?', expected_reply=True)
+        pdp_contexts = []
+        for i in range(0, len(result), 15):
+            cid = int(result[i])
+            pdp_type = SaraR5Module.PDPType(result[i+1].strip('"'))
+            apn = result[i+2]
+            pdp_address = result[i+3]
+            data_compression = int(result[i+4])
+            header_compression = int(result[i+5])
+            ipv4_addr_alloc = bool(result[i+6])
+            request_type = int(result[i+7])
+            pcscf_discovery = int(result[i+8])
+            im_cn_signalling_flag = bool(result[i+9])
+            nslpi = int(result[i+10])
+            secure_pco = bool(result[i+11])
+            ipv4_mtu_discovery = bool(result[i+12])
+            local_addr_indication = bool(result[i+13])
+            non_ip_mtu_discovery = bool(result[i+14])
+            pdp_contexts.append({
+            "cid": cid,
+            "pdp_type": pdp_type,
+            "apn": apn,
+            "pdp_address": pdp_address,
+            "data_compression": data_compression,
+            "header_compression": header_compression,
+            "ipv4_addr_alloc": ipv4_addr_alloc,
+            "request_type": request_type,
+            "pcscf_discovery": pcscf_discovery,
+            "im_cn_signalling_flag": im_cn_signalling_flag,
+            "nslpi": nslpi,
+            "secure_pco": secure_pco,
+            "ipv4_mtu_discovery": ipv4_mtu_discovery,
+            "local_addr_indication": local_addr_indication,
+            "non_ip_mtu_discovery": non_ip_mtu_discovery
+            })
+        self.logger.info('PDP Contexts: %s', pdp_contexts)
+        return pdp_contexts
+
+
+
 
     def at_set_pdp_context(self, cid:int=1, pdp_type:PDPType=PDPType.IPV4,
                                apn:str="", pdp_address:str="0.0.0.0", data_compression:bool=False,
@@ -1180,6 +1403,22 @@ class SaraR5Module:
         # self.logger.info('Updating radio statistics')
 
         # return result[1:]
+    def at_get_psd_protocol_type(self, profile_id:int=0):
+        """
+        Get the PSD protocol type for a given profile ID.
+
+        Args:
+            profile_id (int): The profile ID. Must be between 0 and 6.
+
+        Returns:
+            PSDProtocolType: The PSD protocol type.
+        """
+        if profile_id not in range (0, 7):
+            raise ValueError('Profile ID must be between 0 and 6')
+        response_list = self.send_command(f'AT+UPSD={profile_id},0', expected_reply=True)
+        protocol_type = SaraR5Module.PSDProtocolType(int(response_list[2]))
+        self.logger.info('PSD Protocol Type for profile %s is %s',profile_id,protocol_type.name)
+        return protocol_type
 
     def at_set_psd_protocol_type(self, profile_id:int=0,
                                      protocol_type:PSDProtocolType=PSDProtocolType.IPV4):
@@ -1194,6 +1433,23 @@ class SaraR5Module:
             raise ValueError('Profile ID must be between 0 and 6')
         self.send_command(f'AT+UPSD={profile_id},0,{protocol_type.value}',expected_reply=False)
         self.logger.info('PSD Protocol Type set to %s',protocol_type.name)
+
+    def at_get_psd_to_cid_mapping(self, profile_id:int=0):
+        """
+        Get the PSD (Packet Switched Data) profile to CID (Context Identifier) mapping.
+
+        Args:
+            profile_id (int): The profile ID to map (0-6).
+
+        Returns:
+            int: The CID mapped to the profile ID.
+        """
+        if profile_id not in range (0, 7):
+            raise ValueError('Profile ID must be between 0 and 6')
+        response_list = self.send_command(f'AT+UPSD={profile_id},100', expected_reply=True)
+        cid = int(response_list[2])
+        self.logger.info('PSD Profile %s mapped to CID %s',profile_id,cid)
+        return cid
 
     def at_set_psd_to_cid_mapping(self, profile_id:int=0, cid:int=1):
         """
@@ -1241,13 +1497,13 @@ class SaraR5Module:
 
         if parameter == SaraR5Module.PSDParameters.IP_ADDRESS:
             ip = response_list[2]
-            self.module_state.psd.update({"ip": ip}) 
+            self.module_state.psd = {**self.module_state.psd, "ip": ip}
             self.logger.info('PSD Profile %s IP Address is %s',profile_id,ip)
             return ip
 
         if parameter == SaraR5Module.PSDParameters.ACTIVATION_STATUS:
             is_active = bool(int(response_list[2]))
-            self.module_state.psd.update({"is_active": is_active}) 
+            self.module_state.psd = {**self.module_state.psd, "is_active": is_active}
             self.logger.info('PSD Profile %s Activation Status is %s', profile_id, is_active)
             return is_active
 
@@ -1325,6 +1581,23 @@ class SaraR5Module:
         self.send_command(command, expected_reply=False)
         self.logger.info(logger_string)
 
+    def at_read_edrx(self):
+        """
+        Reads the eDRX (extended Discontinuous Reception) parameters.
+
+        Returns:
+            dict: A dictionary containing the eDRX parameters.
+        """
+        result = self.send_command('AT+CEDRXS?', expected_reply=True)
+        mode = SaraR5Module.EDRXMode(int(result[0]))
+        access_technology = SaraR5Module.EDRXAccessTechnology(int(result[1]))
+        requested_edrx_cycle = SaraR5Module.EDRXCycle(int(result[2]))
+        requested_ptw = SaraR5Module.EDRXCycle(int(result[3]))
+        self.logger.info('eDRX Mode: %s, Access Technology: %s, Requested eDRX Cycle: %s, Requested PTW: %s',
+                        mode.name, access_technology.name, requested_edrx_cycle.name, requested_ptw.name)
+        return {"mode": mode, "access_technology": access_technology, "requested_edrx_cycle": requested_edrx_cycle,
+                "requested_ptw": requested_ptw}
+
     def at_set_psm_mode(self, mode:PSMMode, periodic_tau:PSMPeriodicTau=None,
                          active_time:PSMActiveTime=None):
         """
@@ -1354,9 +1627,65 @@ class SaraR5Module:
         self.send_command(command, expected_reply=False, timeout=10)
         self.logger.info(logger_str)
 
+    def at_read_psm_mode(self):
+        """
+        Reads the Power Saving Mode (PSM) for the module.
+
+        Returns:
+            dict: A dictionary containing the PSM parameters.
+        """
+        result = self.send_command('AT+CPSMS?', expected_reply=True)
+        mode = SaraR5Module.PSMMode(int(result[0]))
+        #periodic_rau is result[1]
+        periodic_tau = SaraR5Module.PSMPeriodicTau(int(result[2]))
+        active_time = SaraR5Module.PSMActiveTime(int(result[3]))
+        self.logger.info('PSM Mode: %s, Periodic Tau: %s, Active Time: %s',
+                        mode.name, periodic_tau.name, active_time.name)
+        return {"mode": mode, "periodic_tau": periodic_tau, "active_time": active_time}
+    
+    def at_set_deep_sleep_mode_options(self, eDRX_mode:bool, wake_up_suspended:bool):
+        """
+        Sets the deep sleep mode options for the module.
+
+        Args:
+            eDRX_mode (bool): Enable or disable eDRX mode.
+            wake_up_suspended (bool): Enable or disable wake up suspended mode.
+        """
+        if not isinstance(eDRX_mode, bool) or not isinstance(wake_up_suspended, bool):
+            raise ValueError('eDRX_mode and wake_up_suspended must be boolean values')
+
+        combined_bits = (int(eDRX_mode) << 3) | (int(wake_up_suspended) << 4)
+        if combined_bits < 0 or combined_bits > 24:
+            raise ValueError('Combined bits value must be between 0 and 24')
+
+        self.send_command(f'AT+UPSMVER={combined_bits}', expected_reply=False)
+        self.logger.info('Deep sleep mode options set with eDRX_mode=%s and wake_up_suspended=%s',
+                 eDRX_mode, wake_up_suspended)
+    
+    def at_read_deep_sleep_mode_options(self):
+        """
+        Reads the deep sleep mode options for the module.
+
+        Returns:
+            dict: A dictionary containing the deep sleep mode options.
+        """
+        result = self.send_command('AT+UPSMVER?', expected_reply=True)
+        combined_bits = int(result[0])
+        eDRX_mode = bool(combined_bits & 0b00001000)
+        wake_up_suspended = bool(combined_bits & 0b00010000)
+        self.logger.info('Deep sleep mode options: eDRX_mode=%s, wake_up_suspended=%s',
+                        eDRX_mode, wake_up_suspended)
+        return {"eDRX_mode": eDRX_mode, "wake_up_suspended": wake_up_suspended}    
+
     def at_set_lwm2m_activation(self, enabled: bool):
         self.send_command(f'AT+ULWM2M={int(not enabled)}',expected_reply=False) 
         self.logger.info('LWM2M activation set to %s', 'enabled' if enabled else 'disabled')
+
+    def at_read_lwm2m_activation(self):
+        result = self.send_command('AT+ULWM2M?', expected_reply=True)
+        enabled = bool(int(result[0]))
+        self.logger.info('LWM2M activation is %s', 'enabled' if enabled else 'disabled')
+        return enabled
 
 # URC configuration
 
@@ -1372,6 +1701,18 @@ class SaraR5Module:
         """
         self.send_command(f'AT+UPSMR={int(enabled)}',expected_reply=False)
         self.logger.info('Power Saving Mode URC set to %s', 'enabled' if enabled else 'disabled')
+
+    def at_read_power_saving_mode_urc(self):
+        """
+        Reads the power saving mode URC configuration.
+
+        Returns:
+            bool: True if enabled, False if disabled.
+        """
+        result = self.send_command('AT+UPSMR?', expected_reply=True)
+        enabled = bool(int(result[0]))
+        self.logger.info('Power Saving Mode URC is %s', 'enabled' if enabled else 'disabled')
+        return enabled
 
     def at_set_signalling_cx_status_urc(self, enabled: bool):
         """
@@ -1392,6 +1733,18 @@ class SaraR5Module:
         self.send_command(f'AT+CSCON={config.value}', expected_reply=False)
         self.logger.info('Signalling connection URC set to %s', config.name)
 
+    def at_read_signalling_cx_urc(self):
+        """
+        Reads the signalling connection URC configuration.
+
+        Returns:
+            SignalCxReportConfig: The signalling connection URC configuration.
+        """
+        result = self.send_command('AT+CSCON?', expected_reply=True)
+        config = SaraR5Module.SignalCxReportConfig(int(result[0]))
+        self.logger.info('Signalling connection URC is %s', config.name)
+        return config
+    
 # Filesystem
 
     
@@ -1439,8 +1792,11 @@ class SaraR5Module:
             data (bytes): The data to be uploaded.
         """
         SaraR5Module.validate_filename(filename)
+        upload_command_module_response = 10 #seconds to receive the ">" prompt and OK after data sent.
+        upload_time_margin = 0.5 # an extra 50% in case of transmission errors
+        upload_time = (len(data)*8 / self.serial_config.baudrate) * (1+upload_time_margin) + upload_command_module_response
         self.send_command(f'AT+UDWNFILE="{filename}",{length}',
-                           expected_reply=False, input_data=data,timeout=30)
+                           expected_reply=False, input_data=data,timeout=upload_time)
         self.logger.info('Uploaded %s bytes to %s', length, filename)
 
     def at_read_file(self, filename, timeout=10):
@@ -1583,9 +1939,8 @@ class SaraR5Module:
         else:
             translated_stats['avg_rsrp'] = int(translated_stats['avg_rsrp']) - 141
         translated_stats['RSRQ'] = translate_rsrq(translated_stats['RSRQ'])
-
-        self.module_state.radio_status.update(translated_meta)
-        self.module_state.radio_stats.update(translated_stats)
+        self.module_state.radio_status = translated_meta
+        self.module_state.radio_stats = translated_stats
         return self.module_state.radio_status, self.module_state.radio_stats
 
     @staticmethod
@@ -1650,22 +2005,67 @@ class SaraR5Module:
 
     def _read_serial_and_log(self):
         data = self._serial.readline()
+        timestamp=datetime.datetime.now()
+        timestamp_str = timestamp.strftime("%Y-%m-%d_%H-%M-%S-%f")
         if len(data) > 0:
-            timestamp_str = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S-%f")
-            self.tx_rx_logger.debug('RX: %s',data)
+            self.tx_rx_logger.debug(f'RX: {data},                           T={timestamp_str}')
             #self.receive_log.write(f'{timestamp_str};{data}\n')
-        return data
+        return data, timestamp
 
-    def _write_serial_and_log(self,data):
-        self._serial.write(data)
-        timestamp_str = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S-%f")
+    def _write_serial_and_log(self,data,timeout=5):
+        timestamp = self._write_serial(data,timeout=timeout)
+        timestamp_str = timestamp.strftime("%Y-%m-%d_%H-%M-%S-%f")
         if len(data) < 1024:
-            self.tx_rx_logger.debug('TX: %s',data)
+            self.tx_rx_logger.debug(f'TX: {data},                           T={timestamp_str}')
         else:
             #data too big to log
             self.tx_rx_logger.debug('TX: %s',data[:1024])
+        return timestamp
 
-        #self.send_log.write(f'{timestamp_str};{data}\n')
+
+    def _write_serial(self, data, chunk_size=512, timeout=5):
+
+        """Writes data to serial with timeout, respecting hardware flow control (CTS) and buffer limits."""
+
+        start_time = time.time()
+        end_time = datetime.datetime.now() #will be incremented
+        total_bytes_written = 0
+
+        while total_bytes_written < len(data):
+            time_remaining = timeout - (time.time() - start_time)
+
+            if time_remaining <= 0:
+                raise TimeoutError(f"Write timed out after {timeout} seconds")
+
+            # Check CTS (Clear to Send) before attempting to write
+            if self._serial.cts:
+                try:
+                    # If output buffer is full, wait for space
+                    while self._serial.out_waiting >= chunk_size:
+                        time.sleep(0.01)  # Small wait before checking again
+
+                    # Use select.select to check if the port is ready for writing
+                    _, wlist, _ = select.select([], [self._serial], [], time_remaining)
+
+                    if wlist:  # Device is ready for writing
+                        bytes_to_write = min(len(data) - total_bytes_written, chunk_size)
+                        bytes_written = self._serial.write(data[total_bytes_written:total_bytes_written + bytes_to_write])
+                        end_time = datetime.datetime.now()
+                        total_bytes_written += bytes_written
+                    else:
+                        time.sleep(0.001)  # Small delay to avoid busy-waiting
+
+                except serial.SerialTimeoutException:
+                    raise TimeoutError("Write timed out (SerialTimeoutException)")
+                except OSError as e:
+                    if "Input/output error" in str(e):
+                        raise OSError("Serial port disconnected") from e
+                    else:
+                        raise  # Re-raise other OSError exceptions
+            else:
+                time.sleep(0.01)  # Wait briefly before checking CTS again
+            #self.send_log.write(f'{timestamp_str};{data}\n')
+        return end_time
 
     def _read_from_uart(self):
         """
@@ -1691,11 +2091,17 @@ class SaraR5Module:
         linefeed_timestamp = None
 
         while not self.terminate:
-            data = self._read_serial_and_log()
+            if self._serial_flush_event.is_set():
+                self._serial.reset_input_buffer()
+                self._serial_flush_event.clear()
+                linefeed_buffered = False
+                linefeed_timestamp = None
+
+
+            data, timestamp = self._read_serial_and_log()
             if len(data) < 1:
                 continue
-            timestamp = datetime.datetime.now()
-
+            
             #linefeed
             if data == linefeed:
                 if linefeed_buffered:
@@ -1720,11 +2126,12 @@ class SaraR5Module:
                     linefeed_timestamp = timestamp
                 urc = data.split(b":")[0].decode()
                 urc_data = data.split(b":")[1].decode()
-                linefeed_timestamp_str = linefeed_timestamp.strftime("%Y-%m-%d_%H-%M-%S")
-                timestamp_str = timestamp.strftime("%Y-%m-%d_%H-%M-%S")
+                linefeed_timestamp_str = linefeed_timestamp.strftime("%Y-%m-%d_%H-%M-%S-%f")
+                timestamp_str = timestamp.strftime("%Y-%m-%d_%H-%M-%S-%f")
                 self.logger.debug('URC:\n'
                              '          %s: %s\n'
                              '          %s: %s',linefeed_timestamp_str,linefeed,timestamp_str,data)
+                self.logger.debug(f"post-URC queue contents: {AT_Command_Handler._peek_queue(self.serial_read_queue)}")
                 handler_function = self.urc_mappings[urc]
                 handler_function(urc_data)
                 linefeed_buffered = False
@@ -1743,16 +2150,24 @@ class SaraR5Module:
             data_with_timestamp = (data, timestamp)
             self.serial_read_queue.put(data_with_timestamp)
 
-    def _reset_input_buffer(self):
+    def _reset_input_buffers(self):
         """
         Clears the input buffer by removing all pending items from the queue.
         """
-        while not self.serial_read_queue.empty():
-            try:
-                self.serial_read_queue.get_nowait()
-            except queue.Empty:
-                continue
-            self.serial_read_queue.task_done()
+        
+        self._serial_flush_event.set()
+        while self._serial_flush_event.is_set():
+            time.sleep(1)
+
+        with self.serial_read_queue.mutex:
+
+            self.serial_read_queue.queue.clear()
+            # Reset the counter of unfinished tasks (used when calling task_done() and join())
+            self.serial_read_queue.unfinished_tasks = 0
+            # Notify all waiting threads that the queue's state has changed.
+            self.serial_read_queue.not_empty.notify_all()
+            self.serial_read_queue.not_full.notify_all()
+            self.serial_read_queue.all_tasks_done.notify_all()
 
 #URC handlers
 
@@ -1764,8 +2179,7 @@ class SaraR5Module:
             data (str): The data received from the UUPSDD message.
         """
         data = int(data.rstrip('\r\n').strip())
-        self.module_state.psd.update({"is_active": False, "ip": None})
-        self.logger.info('PSD Profile is inactive')
+        self.module_state.psd = {**self.module_state.psd, "is_active": False, "ip": None}
 
     def handle_uupsda(self, data):
         """
@@ -1776,12 +2190,12 @@ class SaraR5Module:
         """
         data = data.rstrip('\r\n').split(",")
         is_active = not bool(int(data[0]))
-        self.module_state.psd.update({"is_active": is_active})
+        self.module_state.psd = {**self.module_state.psd, "is_active": is_active}
         logger_str = 'MODULE: PSD Profile is active ' if is_active \
             else 'MODULE: PSD Profile is inactive'
         if len(data) > 1:
             ip = data[1].strip('"')
-            self.module_state.psd.update({"ip": ip})
+        self.module_state.psd = {**self.module_state.psd, "ip": ip}
         self.logger.info('%s and has ip: %s', logger_str, ip)
 
     def handle_cereg(self, data):
@@ -1857,9 +2271,6 @@ class SaraR5Module:
             if key == "rac_or_mme":
                 parsed_result[key] = str(value)
 
-        if self.module_state.registration_status != parsed_result["registration_status"]:
-            self.logger.info("MODULE: Registration status changed from %s to %s",
-                        self.registration_status.name, parsed_result['registration_status'].name)
         self.module_state.registration_status = parsed_result["registration_status"]
 
     def handle_cscon(self, data):
@@ -1870,12 +2281,7 @@ class SaraR5Module:
 
     def handle_uupsmr(self, data):
         data = data.rstrip('\r\n').split(",")
-        psm_state = SaraR5Module.PSMState(int(data[0]))
-        if psm_state != self.psm_state:
-            self.logger.info('MODULE: PSM status changed from %s to %s',
-                        self.psm_state.name, psm_state.name)
-        self.psm_state = psm_state
-
+        self.module_state.psm = SaraR5Module.PSMState(int(data[0]))
 
 # Misc
 
