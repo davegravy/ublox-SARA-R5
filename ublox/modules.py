@@ -26,6 +26,8 @@ from dataclasses import dataclass, field
 from functools import partial
 from collections import namedtuple
 from typing import Callable
+from contextlib import nullcontext
+
 
 import os
 import threading
@@ -37,6 +39,8 @@ import serial
 import validators
 import errno
 import select
+import io
+
 
 
 from ublox.http import HTTPClient
@@ -62,6 +66,10 @@ class ConnectionTimeoutError(ATTimeoutError):
 
 class ModuleNotRespondingError(Exception):
     """Module did not respond"""
+
+class URDFFileFormatError(ValueError):
+    """Custom exception raised for invalid URDFILE format."""
+    pass
 
 class MobileNetworkOperator(Enum):
     """
@@ -109,7 +117,7 @@ class AT_Command_Handler():
         self.response_queue = response_queue
         self.output_fn = output_fn
     
-    def send_cmd(self, command:str, input_data:bytes=None, expected_reply=True, expected_multiline_reply=False, timeout=10):
+    def send_cmd(self, command:str, input_data:bytes=None, expected_reply=True, expected_multiline_reply=False, file_out=False, timeout=10):
         
         """
         Sends a command to the module and waits for a response.
@@ -146,6 +154,7 @@ class AT_Command_Handler():
         self.input_data = input_data
         self.expected_reply = expected_reply
         self.expected_multiline_reply = expected_multiline_reply
+        self.file_out = file_out
         self._validate()
         self._prepare_expected_reply()
 
@@ -154,33 +163,40 @@ class AT_Command_Handler():
         #timestamp_write_str = self.command_send_time.strftime("%Y-%m-%d_%H-%M-%S")
         #self.logger.debug('Sent:%s          %s: %s', chr(10), timestamp_write_str, self._command_bytes(terminated=True))
 
+        self.got_linefeed = False
         self.got_reply = True if not self.expected_reply_bytes else False
         self.got_ok = False
         self.result, self.multiline_result = None, []
         self.debug_log = []
         self.timeout_time = time.time() + timeout
+        file_context = open(self.file_out, 'wb') if self.file_out else nullcontext() # Choose context manager conditionally
+
 
         try:
             if self.input_data is not None:
                 self.logger.debug(f"send_cmd with input data, timeout is in {self.timeout_time - time.time()} seconds")
-            while not time.time() > self.timeout_time:
-                if self.got_ok and self.got_reply and self.input_data is None:
-                    break
-                response, timestamp_read = self._get_response()
-                self._process_response(response, timestamp_read)
-                if self.input_data and response and response.startswith(b">"):                    
-                    write_timeout = self.timeout_time - time.time()
-                    self.output_fn(self.input_data,timeout=write_timeout)
-                    self.input_data = None
-            else:   
-                self.logger.error(f"Timeout waiting for response to '{self.command_str}'. State: got_ok={self.got_ok}, got_reply={self.got_reply}, input_data={self.input_data}")
-                raise ATTimeoutError("Timeout waiting for response")
+            with file_context as output_file:
+                while not time.time() > self.timeout_time:
+                    if self.got_ok and self.got_reply and self.input_data is None:
+                        break
+                    response, timestamp_read = self._get_response()
+                    self._process_response(response, timestamp_read, output_file)
+                    if self.input_data and response and response.startswith(b">"):                    
+                        write_timeout = self.timeout_time - time.time()
+                        self.output_fn(self.input_data,timeout=write_timeout)
+                        self.input_data = None
+                else:   
+                    self.logger.error(f"Timeout waiting for response to '{self.command_str}'. State: got_ok={self.got_ok}, got_reply={self.got_reply}, input_data={self.input_data}")
+                    raise ATTimeoutError("Timeout waiting for response")
         except Exception as e:
             raise e
         finally:
             self._log_debug_info()
         
-        return self.multiline_result if self.expected_multiline_reply else self.result
+        if self.expected_multiline_reply and not self.file_out:
+            return self.multiline_result  
+        else:
+            return self.result
 
     def _peek_queue(q:queue.Queue):
         # Acquire the internal mutex so no other thread can modify the queue
@@ -193,6 +209,10 @@ class AT_Command_Handler():
             raise TypeError("expected_reply is not of type bool or str")
         if self.expected_multiline_reply and not self.expected_reply:
             raise ValueError("multiline_reply cannot be True if expected_reply is False")
+        if self.file_out is not None and not isinstance(self.file_out, str):
+            raise TypeError("file_out must be either None or a string")
+        if self.file_out is not None and not self.expected_multiline_reply:
+            raise ValueError("file_out can only be used with expected_multiline_reply=True")
 
     def _command_bytes(self, terminated=True):
         command_bytes_unterminated = self.command_str.encode().rstrip(b"\r\n")
@@ -217,40 +237,70 @@ class AT_Command_Handler():
         except queue.Empty:
             return None, None
         
-    def _process_response(self, response, timestamp_read):
+    def _process_response(self, response, timestamp_read, output_file:io.BufferedWriter):
+        
+        linefeed = b"\r\n"
+
         #TODO: handle scenario where OK received before linefeed (bad state) 
-        if timestamp_read + datetime.timedelta(seconds=0.02) < self.command_send_time:
+        if timestamp_read is not None and timestamp_read + datetime.timedelta(seconds=0.02) < self.command_send_time:
             self.logger.debug(f"Timestamp read {timestamp_read} is before command send time {self.command_send_time}")
             self.logger.debug(f"Command in progress: {self.command_str}, violating response: {response}")
             #raise ValueError("Timestamp read is before command send time")
             
         if response is None:
             return
-        if response.startswith(b"OK"):
+        if response == linefeed:
+            if self.got_ok:
+                self.logger.warning('got linefeed after OK')
+            if self.got_linefeed:
+                self.logger.warning('got consecutive linefeeds')
+            self.got_linefeed = True
+        elif response.startswith(b"OK"): #TODO: make this more specific, ie if response == b"OK\r\n"
+            if not self.got_linefeed:
+                self.logger.warning('got OK before linefeed')
             self.got_ok = True
-        elif self.expected_reply_bytes and response.startswith(self.expected_reply_bytes):
-            self.got_reply = True
-            self.result = response[len(self.expected_reply_bytes):].rstrip(b"\r\n").decode().strip().split(",")
-            self.multiline_result.append(response)
-        elif response.startswith(b"ERROR"):
+            self.got_linefeed = False
+            if self.expected_reply_bytes and not self.got_reply:
+                raise ATError("got OK before expected reply")
+        elif response.startswith(b"ERROR"): #TODO: make this more specific
+            self.got_linefeed = False
             raise ATError
         elif response.startswith(b"+CME ERROR:"):
             code = response.lstrip(b"+CME ERROR:").rstrip(b"\r\n").decode()
+            self.got_linefeed = False
             #TODO: convert code to error message
             raise CMEError(code)
-        elif response == b"\r\n":
-            if self.got_ok:
-                self.logger.warning('got linefeed after OK')
-            pass
+        elif self.expected_reply_bytes and response.startswith(self.expected_reply_bytes):
+            if not self.got_linefeed:
+                self.logger.warning('got reply before linefeed')
+            self.got_reply = True
+            self.got_linefeed = False
+            self.result = response[len(self.expected_reply_bytes):].rstrip(b"\r\n").decode().strip().split(",")
+            if self.file_out:
+                output_file.write(response)
+            else: 
+                self.multiline_result.append(response)
+        elif self.expected_multiline_reply and self.expected_reply_bytes and self.got_reply:
+            if self.got_linefeed:
+                self._write_multiline_output(linefeed, output_file)
+                self.got_linefeed = False
+            self._write_multiline_output(response, output_file)
         elif response.startswith(self._command_bytes(terminated=False)):
-            pass
+            pass #why? echo?
         elif self.input_data and response.startswith(b">"):
+            if not self.got_linefeed:
+                self.logger.warning('got ">" before linefeed')
+            self.got_linefeed = False
             # raw data input prompt, handled elsewhere
             pass
-        elif self.expected_multiline_reply and self.expected_reply_bytes and self.got_reply:
-            self.multiline_result.append(response)
         else:
             self.logger.warning('got unexpected %s', response)
+
+    def _write_multiline_output(self, data, output_file:io.BufferedWriter):
+        if self.file_out:
+            output_file.write(data)
+        else:
+            self.multiline_result.append(data)
 
     def _log_debug_info(self):
         # debug_str = [f'{timestamp.strftime("%Y-%m-%d_%H-%M-%S-%f")}: {response}' for timestamp, response in self.debug_log]
@@ -595,6 +645,7 @@ class SaraR5Module:
                  logger=None, 
                  tx_rx_logger=None):
         
+
         self.logger = logger or logging.getLogger(__name__)
         if logger is None:
             self.logger.setLevel(logging.DEBUG)
@@ -620,6 +671,8 @@ class SaraR5Module:
         
 
         self.terminate = False
+        self.large_binary_xfer = False #to communicate to the read_thread to expect a lot of binary data over UART
+
 
         self.read_uart_thread = threading.Thread(target=self._read_from_uart)
         self.read_uart_thread.daemon = True
@@ -676,10 +729,13 @@ class SaraR5Module:
 
         if clean:
             self.logger.info("Powering OFF the module")
+            self.logger.debug(f"Module model name override: {self.power_control.model_name_override} ")
             success = False
             while not success:
-                #self.power_control.force_power_off()
-                self.power_control.force_power_off_R520()
+                if self.power_control.model_name_override == "R520":
+                    self.power_control.force_power_off_R520()
+                else:
+                    self.power_control.force_power_off()
                 success = self.power_control.await_power_state(False, timeout=30)
                 if not success: self.logger.warning("Power OFF failed, retrying")
                 time.sleep(1)  # wait before retrying
@@ -689,8 +745,10 @@ class SaraR5Module:
             self.logger.info("Powering ON the module")
             success = False
             while not success:
-                #self.power_control.power_on_wake()
-                self.power_control.power_on_wake_R520()
+                if self.power_control.model_name_override == "R520":
+                    self.power_control.power_on_wake_R520()
+                else:
+                    self.power_control.power_on_wake()
                 success = self.power_control.await_power_state(True, timeout=30)
                 if not success: 
                     self.logger.warning("Power ON failed, retrying")
@@ -700,7 +758,6 @@ class SaraR5Module:
 
             time.sleep(3)  # wait for boot
             self._reset_input_buffers()  # remove noise from any preceding power cycles
-            self.logger.debug("here!")
 
             for _ in range(7):
                 try:
@@ -734,8 +791,11 @@ class SaraR5Module:
                 self.logger.info("Powering OFF the module (30 second process), attempt #%s of %s", power_cycles_count, retry_threshold)
                 success = False
                 while not success:
-                    #self.power_control.force_power_off()
-                    self.power_control.force_power_off_R520()
+                    if self.power_control.model_name_override == "R520":
+                        self.power_control.force_power_off_R520()
+                    else:
+                        self.power_control.force_power_off()
+                    
                     success = self.power_control.await_power_state(False, timeout=30)
                     if not success: self.logger.warning("Power OFF failed, retrying")
                     time.sleep(1)  # wait before retrying
@@ -750,7 +810,9 @@ class SaraR5Module:
     def refresh_state(self):
         power_mode: SaraR5Module.ModulePowerMode
         stk_mode: SaraR5Module.STK_Mode
+
         self.logger.info('***Refreshing module state***')
+        
         power_mode, stk_mode = self.at_read_module_functionality()
         self.at_get_eps_network_reg_status()
         if power_mode == SaraR5Module.ModulePowerMode.ON \
@@ -771,11 +833,11 @@ class SaraR5Module:
             self.logger.debug("configured MNO profile: %s, active MNO profile: %s", self.module_config.mno_profile, active_mno_profile)
             return False
         #TODO: PSD profile (which profile is active, how is it configured?)
-        active_edrx = self.at_read_edrx()
-        if active_edrx["mode"] != self.module_config.edrx_mode:
-            self.logger.info("eDRX mode is not synced")
-            self.logger.debug("configured eDRX mode: %s, active eDRX mode: %s", self.module_config.edrx_mode, active_edrx["mode"])
-            return False
+        # active_edrx = self.at_read_edrx()
+        # if active_edrx["mode"] != self.module_config.edrx_mode:
+        #     self.logger.info("eDRX mode is not synced")
+        #     self.logger.debug("configured eDRX mode: %s, active eDRX mode: %s", self.module_config.edrx_mode, active_edrx["mode"])
+        #     return False
         #TODO: other edrx config params
         active_power_saving_mode_urc = self.at_read_power_saving_mode_urc()
         active_signalling_cx_urc = self.at_read_signalling_cx_urc()
@@ -786,12 +848,15 @@ class SaraR5Module:
             if not active_psm_mode["mode"]:
                 self.logger.info("PSM mode is not synced")
                 self.logger.debug("configured PSM mode: %s, active PSM mode: %s", self.module_config.power_saving_mode, active_psm_mode)
+                return False
             if active_psm_mode["periodic_tau"] != self.module_config.tau:
                 self.logger.info("PSM periodic tau is not synced")
                 self.logger.debug("configured PSM periodic tau: %s, active PSM periodic tau: %s", self.module_config.tau, active_psm_mode["periodic_tau"])
+                return False
             if active_psm_mode["active_time"] != self.module_config.active_time:
                 self.logger.info("PSM active time is not synced")
                 self.logger.debug("configured PSM active time: %s, active PSM active time: %s", self.module_config.active_time, active_psm_mode["active_time"])
+                return False
             if not active_power_saving_mode_urc:
                 self.logger.info("Power saving mode URC is not synced")
                 self.logger.debug("configured power saving mode URC: %s, active power saving mode URC: %s", self.module_config.power_saving_mode, active_power_saving_mode_urc)
@@ -811,7 +876,7 @@ class SaraR5Module:
                 return False
             
         active_deep_sleep_mode_options = self.at_read_deep_sleep_mode_options()
-        if not active_deep_sleep_mode_options["eDRX_mode"] or not active_deep_sleep_mode_options["power_saving_mode"]:
+        if not active_deep_sleep_mode_options["eDRX_mode"] or not active_deep_sleep_mode_options["wake_up_suspended"]:
             self.logger.info("Deep sleep mode options are not synced")
             self.logger.debug("active deep sleep mode options: %s",active_deep_sleep_mode_options)
             return False
@@ -819,6 +884,17 @@ class SaraR5Module:
         return True
 
     def setup(self):
+        self.at_read_imei()
+        self.at_read_model_name()
+        if not self.is_config_synced():
+            self.setup_nvm()
+        else:
+            self.at_set_module_functionality(SaraR5Module.ModuleFunctionality.SILENT_RESET)
+        
+        self.wake_from_sleep()
+        self.register_after_wake()
+
+    def setup_nvm(self):
         """
         Sets up the module with the SaraR5ModuleConfig.
 
@@ -826,8 +902,6 @@ class SaraR5Module:
         #TODO: support manually connecting to specific operator
         #TODO: support NB-IoT
         cid_profile_id, psd_profile_id = 1, 0 #TODO: support multiple profiles
-        self.at_read_imei()
-        self.at_read_model_name()
 
         # in case module had protocol stack disabled, need CFUN=126 before CFUN=1
         self.at_set_module_functionality(SaraR5Module.ModuleFunctionality.RESTORE_PROTOCOL_STACK)
@@ -851,19 +925,10 @@ class SaraR5Module:
         else:
             self.at_set_psm_mode(SaraR5Module.PSMMode.DISABLED)
         
-        #TODO: write functions for the below two items
-        self.at_set_deep_sleep_mode_options(eDRX_mode=True, power_saving_mode=True)
+        self.at_set_deep_sleep_mode_options(eDRX_mode=True, wake_up_suspended=True)
 
-        self.at_store_current_configuration()
-        #TODO: implement dedicated function
-        self.send_command("AT+CPWROFF", expected_reply=False)
-        self.power_control.await_power_state(False, timeout=30)
-
-        self.wake_from_sleep()
-        self.register_after_wake()
-        #self.at_set_module_functionality(SaraR5Module.ModuleFunctionality.FULL_FUNCTIONALITY)
-        self.at_set_eps_network_reg_status(self.module_config.registration_status_reporting)
-        self._await_registration(timeout=60)
+        #TODO: get this bug fixed by ublox
+        self.send_command("AT+UHPPLMN=0", expected_reply=False) #disable manual PLMN selection as bug workaround 
 
         if self.module_state.model_name.startswith("R510S"):
 
@@ -873,6 +938,11 @@ class SaraR5Module:
             if not self.module_state.psd["is_active"]:
                 self.at_psd_action(psd_profile_id, SaraR5Module.PSDAction.ACTIVATE)
             self.at_psd_action(psd_profile_id, SaraR5Module.PSDAction.STORE)
+
+        self.at_store_current_configuration()
+        #TODO: implement dedicated function
+        self.send_command("AT+CPWROFF", expected_reply=False)
+        self.power_control.await_power_state(False, timeout=30)
 
     def close(self):
         """
@@ -892,8 +962,9 @@ class SaraR5Module:
         self.power_control.close()
         self.logger.debug('closed power control')
 
-    def wake_from_sleep(self):
-        self.serial_init()
+    def wake_from_sleep(self, re_init=True):
+        if re_init:
+            self.serial_init()
         self.at_set_eps_network_reg_status(self.module_config.registration_status_reporting) #not stored in profile
         self.refresh_state()
         #TODO: call function self.restore_NVM(). Track non-volatile settings in module class and restore them to device from this function    
@@ -912,11 +983,13 @@ class SaraR5Module:
         if self.module_state.psm == SaraR5Module.PSMState.ENTERING_PSM:
             self.at_set_module_functionality(SaraR5Module.ModuleFunctionality.RESTORE_PROTOCOL_STACK)
             #UART power save should already be disabled if we woke from PSM
+        else:
+            self.at_set_module_functionality(SaraR5Module.ModuleFunctionality.FULL_FUNCTIONALITY)
 
         if self.module_state.model_name.startswith("R510S"):
             self.at_set_module_functionality(SaraR5Module.ModuleFunctionality.FULL_FUNCTIONALITY)
         self._await_registration(timeout=60)
-        result = self.send_command("AT+COPS?", expected_reply=True)
+        #result = self.send_command("AT+COPS?", expected_reply=True)
 
         if not self.module_state.model_name.startswith("R510S"):
             return
@@ -1582,6 +1655,7 @@ class SaraR5Module:
         self.logger.info(logger_string)
 
     def at_read_edrx(self):
+        #TODO: fix, does not return mode
         """
         Reads the eDRX (extended Discontinuous Reception) parameters.
 
@@ -1589,13 +1663,12 @@ class SaraR5Module:
             dict: A dictionary containing the eDRX parameters.
         """
         result = self.send_command('AT+CEDRXS?', expected_reply=True)
-        mode = SaraR5Module.EDRXMode(int(result[0]))
-        access_technology = SaraR5Module.EDRXAccessTechnology(int(result[1]))
-        requested_edrx_cycle = SaraR5Module.EDRXCycle(int(result[2]))
-        requested_ptw = SaraR5Module.EDRXCycle(int(result[3]))
-        self.logger.info('eDRX Mode: %s, Access Technology: %s, Requested eDRX Cycle: %s, Requested PTW: %s',
-                        mode.name, access_technology.name, requested_edrx_cycle.name, requested_ptw.name)
-        return {"mode": mode, "access_technology": access_technology, "requested_edrx_cycle": requested_edrx_cycle,
+        access_technology = EDRXAccessTechnology(int(result[0]))
+        requested_edrx_cycle = EDRXCycle(int(result[1]))
+        requested_ptw = EDRXCycle(int(result[2]))
+        self.logger.info('Access Technology: %s, Requested eDRX Cycle: %s, Requested PTW: %s',
+                        access_technology.name, requested_edrx_cycle.name, requested_ptw.name)
+        return {"access_technology": access_technology, "requested_edrx_cycle": requested_edrx_cycle,
                 "requested_ptw": requested_ptw}
 
     def at_set_psm_mode(self, mode:PSMMode, periodic_tau:PSMPeriodicTau=None,
@@ -1637,8 +1710,9 @@ class SaraR5Module:
         result = self.send_command('AT+CPSMS?', expected_reply=True)
         mode = SaraR5Module.PSMMode(int(result[0]))
         #periodic_rau is result[1]
-        periodic_tau = SaraR5Module.PSMPeriodicTau(int(result[2]))
-        active_time = SaraR5Module.PSMActiveTime(int(result[3]))
+        #gprs read timer is result[2]
+        periodic_tau = PSMPeriodicTau(result[3].strip('"'))
+        active_time = PSMActiveTime(result[4].strip('"'))
         self.logger.info('PSM Mode: %s, Periodic Tau: %s, Active Time: %s',
                         mode.name, periodic_tau.name, active_time.name)
         return {"mode": mode, "periodic_tau": periodic_tau, "active_time": active_time}
@@ -1683,7 +1757,7 @@ class SaraR5Module:
 
     def at_read_lwm2m_activation(self):
         result = self.send_command('AT+ULWM2M?', expected_reply=True)
-        enabled = bool(int(result[0]))
+        enabled = not bool(int(result[0]))
         self.logger.info('LWM2M activation is %s', 'enabled' if enabled else 'disabled')
         return enabled
 
@@ -1742,6 +1816,7 @@ class SaraR5Module:
         """
         result = self.send_command('AT+CSCON?', expected_reply=True)
         config = SaraR5Module.SignalCxReportConfig(int(result[0]))
+        #mode = 
         self.logger.info('Signalling connection URC is %s', config.name)
         return config
     
@@ -1799,19 +1874,31 @@ class SaraR5Module:
                            expected_reply=False, input_data=data,timeout=upload_time)
         self.logger.info('Uploaded %s bytes to %s', length, filename)
 
-    def at_read_file(self, filename, timeout=10):
+    def at_read_file(self, filename, file_out=False, timeout=10):
         """
         Reads a file from the module.
 
         Args:
             filename (str): The name of the file to read.
             timeout (int, optional): The timeout value in seconds. Defaults to 10.
+            file_out (str): The name of the file to write the data to if it shouldn't be returned in memory
 
         Returns:
             str: The byte contents of the file.
         """
+
         SaraR5Module.validate_filename(filename)
-        return self.send_command(f'AT+URDFILE="{filename}"', multiline_reply=True, timeout=timeout)
+        self.large_binary_xfer = True
+        result = self.send_command(f'AT+URDFILE="{filename}"', expected_multiline_reply=True, file_out=file_out, timeout=timeout)
+        self.large_binary_xfer = False
+
+        data_to_process = file_out if file_out else result
+        size, data = SaraR5Module._process_URDFILE_data(data_to_process)
+
+        if file_out is None:
+            return data
+        return file_out
+
 
     def at_read_file_blocks(self, filename, offset:int, length:int):
         """
@@ -1970,7 +2057,7 @@ class SaraR5Module:
 
 #AT Command Handling
 
-    def send_command(self, command:str, input_data:bytes=None, expected_reply=True, expected_multiline_reply=False, timeout=10):
+    def send_command(self, command:str, input_data:bytes=None, expected_reply=True, expected_multiline_reply=False, file_out=None, timeout=10):
         """
         Sends a command to the module and waits for a response.
 
@@ -2001,13 +2088,13 @@ class SaraR5Module:
             CMEError: If the module returns a "+CME ERROR" response.
 
         """
-        return self.at_cmd_handler.send_cmd(command, input_data, expected_reply, expected_multiline_reply, timeout)
+        return self.at_cmd_handler.send_cmd(command, input_data, expected_reply, expected_multiline_reply, file_out, timeout)
 
     def _read_serial_and_log(self):
         data = self._serial.readline()
         timestamp=datetime.datetime.now()
         timestamp_str = timestamp.strftime("%Y-%m-%d_%H-%M-%S-%f")
-        if len(data) > 0:
+        if len(data) > 0 and not self.large_binary_xfer:
             self.tx_rx_logger.debug(f'RX: {data},                           T={timestamp_str}')
             #self.receive_log.write(f'{timestamp_str};{data}\n')
         return data, timestamp
@@ -2067,6 +2154,7 @@ class SaraR5Module:
             #self.send_log.write(f'{timestamp_str};{data}\n')
         return end_time
 
+
     def _read_from_uart(self):
         """
         Reads data from the device and processes it.
@@ -2114,10 +2202,18 @@ class SaraR5Module:
             try:
                 data_decoded = data.decode()
             except UnicodeDecodeError as e:
-                self.logger.debug('Received non-UTF-8 data')
-                self.logger.debug('BAD DATA:%s          %s', chr(10), data)
                 #TODO: handle lots of \x00 from PSM
-                raise e
+                #Assumption - URCs are always ASCII
+                if not self.large_binary_xfer:
+                    self.logger.debug('Received non-UTF-8 data')
+                    self.logger.debug('BAD DATA:%s          %s', chr(10), data)
+                    #raise e
+                if linefeed_buffered:
+                    self.serial_read_queue.put((linefeed, linefeed_timestamp))
+                    linefeed_buffered = False
+                self.serial_read_queue.put((data, timestamp))
+                continue
+
             if any(data_decoded.startswith(prefix) for prefix in self.urc_mappings):
                 if not linefeed_buffered:
                     #raise ValueError('URC received before linefeed')
@@ -2126,29 +2222,32 @@ class SaraR5Module:
                     linefeed_timestamp = timestamp
                 urc = data.split(b":")[0].decode()
                 urc_data = data.split(b":")[1].decode()
+
+                # disambiguate CSCON URC from synchronous reply
+                if urc == "+CSCON" and len(urc_data.split(",")) > 1: #only happens in synchronous reply
+                    self.serial_read_queue.put((linefeed, linefeed_timestamp))
+                    linefeed_buffered = False
+                    self.serial_read_queue.put((data, timestamp))
+                    continue
+
                 linefeed_timestamp_str = linefeed_timestamp.strftime("%Y-%m-%d_%H-%M-%S-%f")
                 timestamp_str = timestamp.strftime("%Y-%m-%d_%H-%M-%S-%f")
                 self.logger.debug('URC:\n'
                              '          %s: %s\n'
                              '          %s: %s',linefeed_timestamp_str,linefeed,timestamp_str,data)
-                self.logger.debug(f"post-URC queue contents: {AT_Command_Handler._peek_queue(self.serial_read_queue)}")
                 handler_function = self.urc_mappings[urc]
                 handler_function(urc_data)
                 linefeed_buffered = False
                 continue
 
-            #OK, ERROR, command response, or other case
+            # Handle OK, ERROR, command response, or other case
             if linefeed_buffered:
-                data_with_timestamp = (linefeed, linefeed_timestamp)
-                self.serial_read_queue.put(data_with_timestamp)
+                self.serial_read_queue.put((linefeed, linefeed_timestamp))
                 linefeed_buffered = False
-                data_with_timestamp = (data, timestamp)
-                self.serial_read_queue.put(data_with_timestamp)
-                continue
 
-            #multiline reply case, no linefeed
-            data_with_timestamp = (data, timestamp)
-            self.serial_read_queue.put(data_with_timestamp)
+
+            # Handle multiline reply case, no linefeed
+            self.serial_read_queue.put((data, timestamp))
 
     def _reset_input_buffers(self):
         """
@@ -2169,6 +2268,137 @@ class SaraR5Module:
             self.serial_read_queue.not_full.notify_all()
             self.serial_read_queue.all_tasks_done.notify_all()
 
+    @staticmethod
+    def _process_URDFILE_data(input_data):
+        """
+        Processes a URDFILE, accepting filepath or list of binary strings,
+        avoiding loading entire data into memory for file input.
+
+        If input_data is a string (filepath), it processes the file in-place
+        to extract and return size, streaming data directly to file.
+        If input_data is a list of binary strings, it processes the content
+        directly from the binary strings and returns size and data (in memory).
+
+        To support large files, the file input method streams data directly to
+        the file, avoiding loading the entire file into memory. For smaller
+        inputs, the binary string method accumulates data in memory.
+
+        Args:
+            input_data (str or list[bytes]): Either the filepath to the URDFILE
+                                            or a list containing binary strings
+                                            representing the URDFILE content.
+
+        Returns:
+            tuple[int, bytes] or tuple[int, None] or None:
+                For binary string input: (size (int), data (bytes))
+                For filepath input: (size (int), None) - data is in the modified file
+                Returns None if an error occurs.
+        """
+        try:
+            if isinstance(input_data, str):
+                # --- Filepath input (process file in-place - memory efficient) ---
+                filepath = input_data
+                file = open(filepath, 'rb+') # Open in binary read+write mode
+                is_file_input = True
+            elif isinstance(input_data, list) and all(isinstance(item, bytes) for item in input_data):
+                # --- List of binary strings input (process in memory) ---
+                binary_content = b''.join(input_data)
+                file = io.BytesIO(binary_content) # Treat as file-like object
+                filepath = None
+                is_file_input = False
+            else:
+                raise TypeError("Input must be a filepath (string) or a list of binary strings.")
+
+            header_line = file.readline()
+            header_str = header_line.decode('utf-8')
+
+            if not header_str.startswith('+URDFILE:'):
+                file.close()
+                raise URDFFileFormatError(f"Header missing.")
+
+
+            header_content = header_str[len('+URDFILE:'):]
+
+            first_comma_index = header_content.find(',')
+            if first_comma_index == -1:
+                file.close()
+                raise URDFFileFormatError(f"Missing comma after filename.")
+
+            remaining_content_after_filename = header_content[first_comma_index+1:]
+            second_comma_index = remaining_content_after_filename.find(',')
+            if second_comma_index == -1:
+                file.close()
+                raise URDFFileFormatError(f"Missing comma after size.")
+
+            size_str = remaining_content_after_filename[:second_comma_index].strip()
+
+            try:
+                size = int(size_str)
+            except ValueError:
+                raise URDFFileFormatError(f"Size is not an integer.")
+                file.close()
+                return None
+
+            remaining_content_after_size = remaining_content_after_filename[second_comma_index+1:]
+            third_quote_index = remaining_content_after_size.find('"')
+            if third_quote_index == -1:
+                file.close()
+                raise URDFFileFormatError(f"Missing quote before data.")
+
+            data_start_header_pos = len('+URDFILE:') + first_comma_index + 1 + second_comma_index + 1 + third_quote_index + 1
+            data_start_pos = data_start_header_pos
+
+            # Prepare to read data
+            file.seek(data_start_pos)
+
+            chunk_size = 4096
+            current_pos = 0 # Track write position in file (for file input)
+            bytes_read = 0  # Track bytes read to ensure we read only 'size' bytes
+
+            if is_file_input:
+                # --- Filepath input: Stream data directly to file (memory efficient) ---
+                try:
+                    while bytes_read < size:
+                        bytes_to_read = min(chunk_size, size - bytes_read)
+                        # Seek to the correct read position
+                        file.seek(data_start_pos + bytes_read)
+                        chunk = file.read(bytes_to_read)
+                        if not chunk:
+                            break # Safety break
+
+                        # Seek to current write position
+                        file.seek(current_pos)
+                        file.write(chunk)
+                        current_pos += len(chunk)
+                        bytes_read += len(chunk)
+
+                    # Truncate the file to the exact size
+                    os.ftruncate(file.fileno(), size)
+                    return (size, None)
+                finally:
+                    file.close()
+
+            else:
+                # --- Binary string input: Accumulate data (in memory) - for smaller inputs ---
+                data_bytes = b'' # Initialize data_bytes for binary string input only
+                while bytes_read < size:
+                    bytes_to_read = min(chunk_size, size - bytes_read)
+                    chunk = file.read(bytes_to_read)
+                    if not chunk:
+                        break # Safety break
+                    data_bytes += chunk # Accumulate data for binary string input
+                    bytes_read += len(chunk)
+                file.close()
+                return size, data_bytes # Return size and accumulated data for binary string input
+
+
+        except FileNotFoundError as e: # Catch specific FileNotFoundError and re-raise
+            raise # Re-raise FileNotFoundError to signal file not found
+        except TypeError as e:        # Catch specific TypeError and re-raise
+            raise # Re-raise TypeError for input type issues
+        except Exception as e:         # Generic Exception - could be more specific in a real application
+            raise Exception(f"An unexpected error occurred during URDFILE processing: {e}") from e # Re-raise with more context
+        
 #URC handlers
 
     def handle_uupsdd(self, data):

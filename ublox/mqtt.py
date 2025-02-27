@@ -197,7 +197,7 @@ class MQTTClient:
             "Failed to connect to MQTT broker"
         )
 
-    def publish(self, topic: str, message: str, qos=1):
+    def publish(self, topic:str, qos=1, payload:str=None):
         """
         Publish a message to a topic.
         Args:
@@ -206,11 +206,13 @@ class MQTTClient:
             qos (QoSLevel, optional): The Quality of Service level for the message. Default is QoSLevel.AT_MOST_ONCE.
         """
         qos_level = MQTTCommandHandler.QoSLevel(qos)
+        if payload is None:
+            payload = ""
 
         self._execute_command(
             self._command_handler.at_mqtt_publish,
             f"Failed to publish message to topic {topic}",
-            topic, message, qos_level
+            topic, payload, qos_level
         )
 
     def publish_file_on_module(self, topic: str, send_filename: str, qos=1):
@@ -305,12 +307,18 @@ class MQTTClient:
             callback (callable): The callback function to call for each message.
         """
         
-        self._module.logger.info("Fetching MQTT messages")
-        message_count = self.message_count
-        for i in range(message_count):
-            message = self._command_handler.at_mqtt_read_message()
-            callback(self, None, message)
-            self.message_count -= 1
+        from ublox.modules import ATError
+        self._module.logger.info(f"Fetching {self.message_count} MQTT messages")
+        #message_count = self.message_count
+        try:
+            while self.message_count > 0:
+                self._module.logger.debug("Remaining messages: %d", self.message_count)
+                message = self._command_handler.at_mqtt_read_message()
+                callback(self, None, message)
+        except ATError as e:
+            self._module.logger.info(f"Timeout fetching MQTT messages, assumed no more messages: {str(e)}")
+            return
+
 
     def handle_uumqttc(self, data):
         """
@@ -552,7 +560,7 @@ class MQTTCommandHandler:
         message:MQTTMessage = self.parse_mqtt_message(message_data)
         self._module.logger.debug("Parsed MQTTMessage: %s", vars(message))
         return message
-
+    
     def parse_mqtt_message(self, message_data):
         """
         Parses MQTT message data from the module.

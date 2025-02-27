@@ -3,6 +3,7 @@ import string
 import logging
 import json
 import copy
+import os
 import time
 from enum import Enum
 from urllib.parse import urlparse
@@ -13,6 +14,9 @@ import validators
 if TYPE_CHECKING:
     from ublox.modules import SaraR5Module
     from ublox.security_profile import SecurityProfile
+
+class HTTPClientError(Exception):
+    """UUHTTPCR on Module"""
 
 class HTTPClient:
     """
@@ -67,7 +71,7 @@ class HTTPClient:
             security_profile (SecurityProfile): The security profile for the HTTP client.
 
         """
-        if profile_id not in range(0,3):
+        if profile_id not in range(0,4):
             raise ValueError("Profile id must be between 0 and 3")
         if not module:
             raise ValueError("Module must be set")
@@ -78,12 +82,37 @@ class HTTPClient:
         self.security_profile = security_profile
         self.error_code = None
         self.hostname = ""
+        self.ip = None
         self.server_port = 80
         self.ssl = False
         self.timeout = 180
         self.server_path = "/"
+        self.headers = {}
 
-    def set_server_params(self, hostname=None, ip=None, port=80, ssl=False,
+    def restore_profile(self):
+        """
+        Restores the HTTP profile on the module from locally stored values. Useful after wake since the HTTP profile is volatile.
+        """
+        params = {
+            "hostname": self.hostname,
+            "ip": self.ip,
+            "port": self.server_port,
+            "ssl": self.ssl,
+            "timeout": self.timeout,
+            "headers": self.headers
+        }
+
+        if self.hostname == "" or not self.hostname:
+            del params["hostname"]
+        else: 
+            del params["ip"]
+        
+        if self.ip is None:
+            params.pop("ip", None)
+
+        self.set_server_params(**params)
+
+    def set_server_params(self, hostname=None, ip=None, port=None, ssl=False,
                             timeout=180, headers:dict=None):
         """
         Set the parameters for the target HTTP server.
@@ -94,7 +123,7 @@ class HTTPClient:
             ip (str, optional): The IP address of the server. 
                 Only used if hostname is not provided.
             port (int, optional): The port number of the server. 
-                Default is 80.
+                Default is 80 for HTTP, 443 for HTTPS.
             ssl (bool, optional): Enable SSL/TLS for the connection. 
                 Default is False.
             timeout (int, optional): The timeout value for the HTTP request. 
@@ -115,7 +144,9 @@ class HTTPClient:
             self.at_set_http_server_ip(ip)
 
         profile_id = self.security_profile.profile_id if self.security_profile else None
-        self.at_set_http_server_port(port)
+
+        if port:
+            self.at_set_http_server_port(port)
         self.at_set_http_ssl(ssl, profile_id)
         self.at_set_http_timeout(timeout)
         self.set_header_string(headers)
@@ -133,7 +164,7 @@ class HTTPClient:
         """
         if len(headers.keys()) > 5:
             raise ValueError("Too many headers. Max 5 headers allowed")
-        for header_id in range(0,4):
+        for header_id in range(0,5):
             if header_id > len(headers.keys()) - 1:
                 #clear the header id
                 header_string = str(header_id) + ":"
@@ -144,14 +175,17 @@ class HTTPClient:
                     raise ValueError("Header key and value must be less than 64 characters")
                 header_string = str(header_id) + ":" + key + ":" + value
             self.at_set_http_header(header_string)
+            self.headers = headers
 
-    def get(self, server_path="/"):
+    def get(self, server_path="/", file_out=None):
         """
         Sends an HTTP GET request to the specified server path and returns the response.
 
         Args:
             server_path (str, optional): The path on the server to send the GET request to. 
                 Defaults to "/".
+            file_out (str, optional): The filename to save the response to. If not provided,
+                the response will be returned as a string
 
         Returns:
             HTTPResponse: The response object containing the data and error information, if any.
@@ -162,14 +196,16 @@ class HTTPClient:
         self.at_http_get(server_path, filename)
         if self.error:
             error_class, error_code = self.at_http_get_error()
-            if error_class == 3:
+            if error_class in [3,10,11]:
                 self.error_code = error_code
                 error_description = self.error_code_description
-                self._module.logger.error('HTTP GET failed with error code %s: %s',
-                                error_code, error_description)
-
+            error_message = "HTTP GET failed"
+            if error_code is not None and error_description is not None:
+                error_message += f" with error code {error_code}: {error_description}"
+            raise HTTPClientError(error_message)
         else:
-            data = self._module.at_read_file(filename,timeout=60)
+            #TODO: get filesize first to set timeout
+            data = self._module.at_read_file(filename,file_out=file_out,timeout=600)
 
         self._module.at_delete_file(filename)
         return HTTPResponse(data, copy.copy(self))
@@ -308,6 +344,7 @@ class HTTPClient:
             raise ValueError("Invalid IPV4 address")
 
         self._module.send_command(f'AT+UHTTP={self.profile_id},0,"{ip}"',expected_reply=False)
+        self.ip = ip
         self._module.logger.info("Set HTTP server IP to %s for HTTP profile %s",ip,self.profile_id)
 
     def at_set_http_server_hostname(self, hostname):
@@ -318,7 +355,7 @@ class HTTPClient:
             hostname (str): The hostname to set.
 
         """
-        if len(hostname) not in range (1,1024):
+        if len(hostname) not in range (1,1025):
             raise ValueError("Hostname must be 1 to 1024")
         if not validators.domain(hostname):
             raise ValueError("Invalid hostname")
@@ -356,8 +393,8 @@ class HTTPClient:
                 Must be None or an integer between 0 and 3.
 
         """
-        if not (security_profile_id is None or security_profile_id in range(0,3)):
-            raise ValueError("Security profile id must be None or an int between 0 and 3")
+        if not (security_profile_id is None or security_profile_id in range(0,4)):
+            raise ValueError(f"Security profile id must be None or an int between 0 and 3, got: {security_profile_id}")
         if ssl == HTTPClient.HTTPSConfig.DISABLED and security_profile_id is not None:
             raise ValueError("Security profile id must be None if SSL is disabled")
 
@@ -378,8 +415,8 @@ class HTTPClient:
             Must be between 30 and 180 seconds.
 
         """
-        if timeout not in range(30,180):
-            raise ValueError("Timeout must be between 30 and 180 seconds")
+        if timeout not in range(30,181):
+            raise ValueError(f"Timeout must be between 30 and 180 seconds, got: {timeout}")
         self._module.send_command(f'AT+UHTTP={self.profile_id},7,{timeout}',expected_reply=False)
         self.timeout = timeout
         self._module.logger.info("Set HTTP timeout to %s seconds for HTTP profile %s",timeout,self.profile_id)
@@ -428,8 +465,8 @@ class HTTPClient:
                                     f'"{response_filename}"', expected_reply=False)
         self.server_path = server_path
         self._await_http_response(timeout = self.timeout)
-
         self._module.logger.info('HTTP GET request to "%s" for HTTP profile %s', self.url, self.profile_id)
+
 
     def at_http_post(self, server_path, response_filename, send_filename, content_type:ContentType):
         """
@@ -516,6 +553,7 @@ class HTTPClient:
                 continue
 
             if self.completed == 1:
+                self._module.logger.debug('HTTP request completed')
                 break
 
             elapsed_time = time.time() - start_time
@@ -534,11 +572,13 @@ class HTTPClient:
         """
         data = data.rstrip('\r\n').split(",")
         profile_id = int(data[0])
-        #no use for data[1] which is the http command type (get,post,etc)
+        command_type = int(data[1]) #the http command type (get,post,etc)
         status = int(data[2])
         http_profile:HTTPClient = module.http_profiles[profile_id]
         http_profile.completed = True
         http_profile.error = status == 0
+        if http_profile.error:
+            module.logger.error(f"HTTP action failed. Command type: {command_type}, profile: {profile_id}")
 
     @property
     def url(self):
@@ -582,11 +622,12 @@ class HTTPResponse:
         request (str): The HTTP request associated with the response.
         status_code (int): The HTTP status code of the response.
         reason (str): The reason phrase associated with the status code.
-        content (str): The raw content of the response.
+        content (str or None): If parsed from a file, this holds the filename
+            where the content is stored; otherwise it may hold raw content.
         encoding (str): The encoding of the response.
-        text (str): The decoded text content of the response.
+        text (str or None): The decoded text content of the response or,
+            when file‐based, possibly None.
         headers (dict): The headers of the response.
-
     """
 
     def __init__(self, data, request):
@@ -597,7 +638,14 @@ class HTTPResponse:
         self.encoding = None
         self.text = None
         self.headers = None
-        self.parse(data)
+
+        # If data is a filename, process the file without loading it all into memory.
+
+        if isinstance(data, str): 
+            if os.path.isfile(data):
+                self.parse_file(data)
+        else:
+            self.parse(data)
 
     def json(self, **kwargs):
         """
@@ -616,23 +664,91 @@ class HTTPResponse:
 
     def parse(self, data):
         """
-        Parses the HTTP response data.
+        Parses the HTTP response data provided as a list of byte strings.
 
         Args:
-            data (str): The HTTP response data.
-
+            data (byte-string): The HTTP response data.
         """
-        _, self.status_code,self.reason, _ = HTTPResponse.parse_http_metadata(data)
+        # Parse metadata (first line)
+        lines = data.split(b'\r\n')
+        self.status_code, self.reason, _ = HTTPResponse.parse_http_metadata(lines[0])
+        header_lines = []
+        content_lines = []
+        delineator = False
 
-        #TODO: determine encoding
+        for line in lines[1:]:
+            try:
+                if line == b'':
+                    delineator = True
+                    continue
+                if not delineator:
+                    header_lines.append(line.decode('utf-8'))
+                else:
+                    content_lines.append(line)
+                
+            except UnicodeDecodeError:
+                pass
+        
+        #lines = HTTPResponse.split_lines(data)
 
-        lines = HTTPResponse.split_lines(data)
+        self.headers = HTTPResponse.parse_headers(header_lines)
 
-        self.headers = HTTPResponse.parse_headers(lines)
+        # As before, assume the second last line holds the content (with the trailing quote removed)
+        self.content = b''.join(content_lines)
 
-        #TODO: generate content (before decoding)
-        self.text = lines[-2][:-1]
-        # 2nd last line is content, remove the last character which is a double quote
+    def parse_file(self, file_path):
+        with open(file_path, 'rb') as f:
+            # Read the first line for metadata.
+            first_line = f.readline()
+            self.status_code, self.reason, _ = HTTPResponse.parse_http_metadata(first_line)
+
+            # Read headers line by line.
+            header_lines = []
+            while True:
+                line = f.readline()
+                if not line:
+                    break
+                decoded_line = line.decode('utf-8', errors='replace').strip('\r\n')
+                if decoded_line == '':
+                    break  # End of headers.
+                header_lines.append(decoded_line)
+            self.headers = HTTPResponse.parse_headers(header_lines)
+
+            content_file_path = file_path + ".content"
+            with open(content_file_path, 'wb') as content_file:
+                if "Content-Length" in self.headers:
+                    # If Content-Length is provided, only read exactly that many bytes.
+                    content_length = int(self.headers.get("Content-Length", 0))
+                    bytes_remaining = content_length
+                    chunk_size = 4096
+                    while bytes_remaining > 0:
+                        to_read = min(chunk_size, bytes_remaining)
+                        chunk = f.read(to_read)
+                        if not chunk:
+                            break  # Handle unexpected EOF.
+                        content_file.write(chunk)
+                        bytes_remaining -= len(chunk)
+
+                    # Check if there are additional unread bytes in the file.
+                    remaining_data = f.read()
+                    if remaining_data:
+                        print(f"Warning: {len(remaining_data)} additional unread bytes left in the file.")
+                else:
+                    # No Content-Length provided; read until the end of the file.
+                    chunk_size = 4096
+                    while True:
+                        chunk = f.read(chunk_size)
+                        if not chunk:
+                            break
+                        content_file.write(chunk)
+
+        # remove file_path and move content_file_path to file_path
+        os.remove(file_path)
+        os.rename(content_file_path, file_path)
+        # Store the file name instead of loading content in memory.
+        self.content_file_path = file_path
+        self.text = None  # or set to the filename if preferred
+
 
     @staticmethod
     def parse_http_metadata(data):
@@ -640,28 +756,36 @@ class HTTPResponse:
         Parse the HTTP metadata from the given data.
 
         Args:
-            data (list): A list of bytes representing the HTTP metadata.
+            data (list of bytes): A list of bytes representing the HTTP metadata.
 
         Returns:
             tuple: A tuple containing the length, code, message, and protocol 
                 extracted from the HTTP metadata.
         """
-        decoded = [x.decode() for x in data]
-        urc = decoded[0].split(",")
-        length = urc[1]
-        http_data = urc[2].strip('"')
+#        decoded = [x.decode('utf-8', errors='replace') for x in data][0]
 
-        parts = http_data.split(' ', 2)
+        decoded = data.decode('utf-8')
+        
+
+        parts = decoded.split(' ', 3)
         protocol = parts[0]
         code = parts[1]
-        message = parts[2]
+        message = parts[2].rstrip('\r\n')
 
-        return length, code, message, protocol
+        return code, message, protocol
 
     @staticmethod
     def split_lines(data):
+        """
+        Splits the provided data (list of byte strings) into individual lines.
 
-        decoded = [x.decode() for x in data]
+        Args:
+            data (list of bytes): The HTTP response data.
+
+        Returns:
+            list: A list of strings representing lines of the response.
+        """
+        decoded = [x.decode('utf-8', errors='replace') for x in data]
         joined = ''.join(decoded[1:])
         lines = joined.split('\r\n')
         return lines
@@ -672,14 +796,13 @@ class HTTPResponse:
         Parse the headers from the HTTP response lines.
 
         Args:
-            lines (list): A list of strings representing the lines of the HTTP response.
+            lines (list of str): A list of strings representing the header lines.
 
         Returns:
             dict: A dictionary containing the parsed headers.
         """
-        headers = lines[:-2]
         header_dict = {}
-        for header in headers:
+        for header in lines:
             if ': ' in header:
                 key, value = header.split(': ', 1)
                 header_dict[key] = value

@@ -28,6 +28,7 @@
             "type": "pickString",
             "description": "Enter a space-separated list of servers (e.g., root@cellmodem.davegrant.ca:1022 root@16el.davegrant:22201 ...)",
             "options":["root@99.210.31.47:1022",
+                      "root@16el.davegrant.ca:22203 root@16el.davegrant.ca:22205",
                       "root@16el.davegrant.ca:22201 root@16el.davegrant.ca:22202 root@16el.davegrant.ca:22203"]
        
         }
