@@ -40,7 +40,7 @@ import validators
 import errno
 import select
 import io
-
+import json
 
 
 from ublox.http import HTTPClient
@@ -328,6 +328,7 @@ class SaraR5ModuleState:
     registration_status: 'SaraR5Module.EPSNetRegistrationStatus' = None
     radio_status: dict = field(default_factory=dict)
     radio_stats: dict = field(default_factory=dict)
+    location: dict = field(default_factory=dict)
     logger: logging.Logger = field(default=logging.getLogger(__name__))
 
     parameter_names = {
@@ -339,7 +340,8 @@ class SaraR5ModuleState:
         'signalling_cx_status': 'Signalling Connection Status',
         'registration_status': 'Registration Status',
         'radio_status': 'Radio Status',
-        'radio_stats': 'Radio Statistics'
+        'radio_stats': 'Radio Statistics',
+        'location': 'GPS Location Data'
     }
 
     def state_change(self, parameter_name, old_value, new_value):
@@ -642,6 +644,7 @@ class SaraR5Module:
                  serial_config:SaraR5SerialConfig,
                  module_config:SaraR5ModuleConfig, 
                  power_control: type = PowerControl, 
+                 model:str = "R520",
                  logger=None, 
                  tx_rx_logger=None):
         
@@ -665,6 +668,7 @@ class SaraR5Module:
                                      stopbits=1,timeout=0.1)
         self._serial_flush_event = threading.Event()
         self.power_control:PowerControl = power_control(logger=self.logger)
+        self.model = model
 
         self.serial_read_queue = queue.Queue()
         self.at_cmd_handler = AT_Command_Handler(self.serial_read_queue, self._write_serial_and_log, logger=self.logger)
@@ -694,7 +698,8 @@ class SaraR5Module:
             "+UUHTTPCR": partial(HTTPClient.handle_uuhttpcr, self),
             "+CSCON": self.handle_cscon,
             "+UUPSMR": self.handle_uupsmr,
-            "+UUMQTTC": self.mqtt_client.handle_uumqttc
+            "+UUMQTTC": self.mqtt_client.handle_uumqttc,
+            "+UULOC": self.handle_uuloc
             #"+CGPADDR": self.handle_cgpaddr,
         }
 
@@ -729,10 +734,10 @@ class SaraR5Module:
 
         if clean:
             self.logger.info("Powering OFF the module")
-            self.logger.debug(f"Module model name override: {self.power_control.model_name_override} ")
+            self.logger.debug(f"Module model: {self.model} ")
             success = False
             while not success:
-                if self.power_control.model_name_override == "R520":
+                if self.model == "R520":
                     self.power_control.force_power_off_R520()
                 else:
                     self.power_control.force_power_off()
@@ -745,7 +750,7 @@ class SaraR5Module:
             self.logger.info("Powering ON the module")
             success = False
             while not success:
-                if self.power_control.model_name_override == "R520":
+                if self.model == "R520":
                     self.power_control.power_on_wake_R520()
                 else:
                     self.power_control.power_on_wake()
@@ -791,7 +796,7 @@ class SaraR5Module:
                 self.logger.info("Powering OFF the module (30 second process), attempt #%s of %s", power_cycles_count, retry_threshold)
                 success = False
                 while not success:
-                    if self.power_control.model_name_override == "R520":
+                    if self.model == "R520":
                         self.power_control.force_power_off_R520()
                     else:
                         self.power_control.force_power_off()
@@ -820,7 +825,7 @@ class SaraR5Module:
                              SaraR5Module.STK_Mode.STK_RAW_MODE]:
             self.at_get_pdp_context()
         
-        if self.module_state.model_name.startswith("R510S"):
+        if self.model == "R510S":
             self.at_get_psd_to_cid_mapping(profile_id=0)
             self.at_get_psd_protocol_type(profile_id=0)
             self.at_get_psd_profile_status(profile_id=0, parameter=SaraR5Module.PSDParameters.ACTIVATION_STATUS)
@@ -930,7 +935,7 @@ class SaraR5Module:
         #TODO: get this bug fixed by ublox
         self.send_command("AT+UHPPLMN=0", expected_reply=False) #disable manual PLMN selection as bug workaround 
 
-        if self.module_state.model_name.startswith("R510S"):
+        if self.model == "R510S":
 
             self.at_set_psd_protocol_type(psd_profile_id, SaraR5Module.PSDProtocolType.IPV4)
             self.at_set_psd_to_cid_mapping(psd_profile_id, cid_profile_id)
@@ -962,7 +967,7 @@ class SaraR5Module:
         self.power_control.close()
         self.logger.debug('closed power control')
 
-    def wake_from_sleep(self, re_init=True):
+    def wake_from_sleep(self, re_init=True, restore_HTTP_profiles=[]):
         if re_init:
             self.serial_init()
         self.at_set_eps_network_reg_status(self.module_config.registration_status_reporting) #not stored in profile
@@ -970,7 +975,14 @@ class SaraR5Module:
         #TODO: call function self.restore_NVM(). Track non-volatile settings in module class and restore them to device from this function    
         #e.g. MQTT settings, security profiles, etc
         self.mqtt_client.at_set_mqtt_nonvolatile(MQTTClient.NonVolatileOption.RESTORE_FROM_NVM)
-        if not self.module_state.model_name.startswith("R510S"):
+        for profile in restore_HTTP_profiles:
+            if isinstance(profile, HTTPClient):
+                profile.restore_profile()
+            else:
+                raise TypeError("restore_HTTP_profiles must be a list of HTTPClient objects")
+
+
+        if not self.model == "R510S":
             return
 
         if not self.module_state.psd["is_active"]:
@@ -986,12 +998,12 @@ class SaraR5Module:
         else:
             self.at_set_module_functionality(SaraR5Module.ModuleFunctionality.FULL_FUNCTIONALITY)
 
-        if self.module_state.model_name.startswith("R510S"):
+        if self.model == "R510S":
             self.at_set_module_functionality(SaraR5Module.ModuleFunctionality.FULL_FUNCTIONALITY)
         self._await_registration(timeout=60)
         #result = self.send_command("AT+COPS?", expected_reply=True)
 
-        if not self.module_state.model_name.startswith("R510S"):
+        if not self.model == "R510S":
             return
         self.at_get_psd_profile_status(0, SaraR5Module.PSDParameters.ACTIVATION_STATUS)
         if not self.module_state.psd["is_active"]:
@@ -1085,6 +1097,10 @@ class SaraR5Module:
             check_space (bool, optional): If True, checks the available space on the device's
                 filesystem before uploading the file. Defaults to False.
         """
+        if not os.path.exists(filepath_in):
+            raise FileNotFoundError(f'File {filepath_in} not found')
+        if os.path.getsize(filepath_in) == 0:
+            raise ValueError(f'File {filepath_in} is empty')
         file_exists = True
         try:
             self.at_read_file_blocks(filename_out, 0, 0)
@@ -1200,6 +1216,80 @@ class SaraR5Module:
                 raise ConnectionTimeoutError(f'Could not retrieve ICCID in {timeout} seconds')
             
             time.sleep(polling_interval)
+
+
+    def sync_location_with_file(self, file_path: str):
+        """
+        Synchronize the in-memory dictionary (self.module_state.location)
+        with the JSON file at file_path, ensuring the latest timestamped data is retained.
+        
+        Behavior:
+            - Writes to the file if it doesn't exist, or if the in-memory data is valid and newer.
+            
+            
+        Returns:
+            The latest data as a Python dictionary.
+        """
+        def is_valid(data):
+            # Checks if data is a dict with a valid 'timestamp' (an integer)
+            return isinstance(data, dict) and 'datetime' in data and isinstance(data['datetime'], float)
+        
+        file_data = None
+        
+        # Try loading the JSON file if it exists
+        if os.path.exists(file_path):
+            try:
+                with open(file_path, 'r') as f:
+                    file_data = json.load(f)
+            except (json.JSONDecodeError, IOError) as e:
+                # If file reading fails or JSON is invalid, treat file_data as None.
+                file_data = None
+        
+        # Retrieve the in-memory data
+        memory_data = self.module_state.location
+        memory_valid = is_valid(memory_data)
+        file_valid = is_valid(file_data)
+
+        self.logger.debug(f"Memory data: {memory_data} (valid: {memory_valid})")
+        self.logger.debug(f"File data: {file_data} (valid: {file_valid})")
+        
+        # Determine which source has the latest data (using 'timestamp').
+        # Case 1: Write to file and return file data if:
+        #   - The file doesn't exist or its data is invalid, and the in-memory data is valid, OR
+        #   - The in-memory data is valid and has a newer timestamp.
+        if memory_valid and (not file_valid or memory_data['datetime'] > file_data.get('datetime', 0)):
+            try:
+                os.makedirs(os.path.dirname(file_path), exist_ok=True)
+                with open(file_path, 'w') as f:
+                    json.dump(memory_data, f)
+            except IOError as e:
+                # Handle file write error gracefully
+                print(f"Error writing to file: {e}")
+            self.logger.debug(f"Selected memory_data. Data written to file: {file_path}")
+            return memory_data
+        
+        # Case 2: Return file data if
+        #   - The file's data is valid and newer than in-memory data,
+        #   - Or the in-memory data is missing or invalid.
+        if file_valid and (not memory_valid or file_data['datetime'] > memory_data.get('datetime', 0)):
+            self.logger.debug(f"Selected file_data")
+            return file_data
+        
+        # Fallback: if neither condition applies, return whichever is valid (or an empty dict)
+        result = memory_data if memory_valid else file_data if file_valid else {}
+        self.logger.debug(f"Selected fallback data. result: {result}")
+        return result
+    
+    def pop_location(self):
+        """
+        Pops the location data from the module state and returns it.
+
+        Returns:
+            dict: The location data.
+        """
+        location = self.module_state.location
+        self.module_state.location = {}
+        return location
 
 # Serial control
 
@@ -1867,6 +1957,8 @@ class SaraR5Module:
             data (bytes): The data to be uploaded.
         """
         SaraR5Module.validate_filename(filename)
+        if min(length, len(data)) <= 0:
+            raise ValueError('Length must be greater than 0')
         upload_command_module_response = 10 #seconds to receive the ">" prompt and OK after data sent.
         upload_time_margin = 0.5 # an extra 50% in case of transmission errors
         upload_time = (len(data)*8 / self.serial_config.baudrate) * (1+upload_time_margin) + upload_command_module_response
@@ -1930,6 +2022,51 @@ class SaraR5Module:
         self.send_command(f'AT+UDELFILE="{filename}"', expected_reply=False)
         self.logger.info('Deleted file %s', filename)
 
+# Localization SVCS
+
+    def at_configure_thingstream_ZTP_spotnow(self, token, device_name, tags: list = None):
+        """
+        Configures the module for Zero Touch Provisioning (ZTP) with Thingstream SpotNow.
+
+        Args:
+            token (str): The Thingstream token.
+            device_name (str): The name of the device.
+            tags (list, optional): A list of tags to associate with the device.
+        """
+        if not isinstance(token, str) or not isinstance(device_name, str):
+            raise ValueError('Token and device name must be strings')
+        if tags and not isinstance(tags, list):
+            raise ValueError('Tags must be a list')
+        if len(tags) > 5:
+            raise ValueError('Maximum of 5 tags allowed')
+        # the type of all elements of tags must be string
+        if tags and not all(isinstance(tag, str) for tag in tags):
+            raise ValueError('All tags must be strings')
+        
+        tags_str = ','.join(f'"{tag}"' for tag in tags) if tags else ''
+        self.send_command(f'AT+UGLAASZTP=2,"{token}","{device_name}",{tags_str}', expected_reply=False, timeout=10)
+        self.logger.info('Thingstream ZTP SpotNow configured')
+
+    def at_get_spotnow_localization_data(self, timeout=10, accuracy=30):
+        """
+        Gets the localization data from Thingstream SpotNow.
+
+        Args:
+            timeout (int, optional): The timeout value in seconds. Defaults to 10.
+            accuracy (int, optional): The accuracy value in meters. Defaults to 30.
+        """
+        mode = 2 #others reserved
+        sensor = 16 #spotnow
+        response_type = 1 #detailed URC response
+
+        if not 1 <= timeout <= 999:
+            raise ValueError('Timeout must be between 1 and 999 seconds')
+        if not 1 <= accuracy <= 999999:
+            raise ValueError('Accuracy must be between 1 and 999999 meters')
+        
+        result = self.send_command(f'AT+ULOC={mode},{sensor},{response_type},{timeout},{accuracy}', expected_reply=False)
+        self.logger.info('SpotNow localization data requested')
+            
     def _parse_radio_stats(self, radio_data):
         """
         Parses the radio statistics data and translates the values into meaningful information.
@@ -2220,8 +2357,8 @@ class SaraR5Module:
                     self.logger.warning('URC received before linefeed. Can occur on first init of module')
                     linefeed_buffered = True
                     linefeed_timestamp = timestamp
-                urc = data.split(b":")[0].decode()
-                urc_data = data.split(b":")[1].decode()
+                urc = data.split(b":",1)[0].decode()
+                urc_data = data.split(b":",1)[1].decode().lstrip()
 
                 # disambiguate CSCON URC from synchronous reply
                 if urc == "+CSCON" and len(urc_data.split(",")) > 1: #only happens in synchronous reply
@@ -2512,6 +2649,51 @@ class SaraR5Module:
     def handle_uupsmr(self, data):
         data = data.rstrip('\r\n').split(",")
         self.module_state.psm = SaraR5Module.PSMState(int(data[0]))
+
+    def handle_uuloc(self,data):
+        data = data.rstrip('\r\n').split(",")
+        self.logger.debug(data)
+        self.logger.debug(len(data))
+        response_type = None
+
+        if len(data) == 6:
+            response_type = 0
+        elif len(data) == 10:
+            response_type = 2
+        elif len(data) == 13:
+            response_type = 1
+        elif len(data) >= 15:
+            response_type = 2
+        else:
+            raise ValueError('Unexpected number of parameters in UULOC URC')
+        
+        if response_type == 2:
+            raise NotImplementedError('UULOC response type 2 not yet supported')
+        
+        date = datetime.datetime.strptime(data[0], "%d/%m/%Y").date()
+        time = datetime.datetime.strptime(data[1], "%H:%M:%S.%f").time()
+        dt = datetime.datetime.combine(date, time).replace(tzinfo=datetime.timezone.utc)
+        
+
+        location = {
+            "datetime": dt.timestamp(),
+            "latitude": float(data[2]),
+            "longitude": float(data[3]),
+            "altitude": float(data[4]),
+            "uncertainty": int(data[5]) #Estimated 50% confidence level error, in meters (0 - 20000000)
+        }
+
+        if response_type == 1:
+
+            location["speed"] = float(data[6])
+            location["course"] = float(data[7])
+            location["vertical_accuracy"] = int(data[8])
+            location["response_source"] = int(data[9])
+            location["satellites_used"] = int(data[10])
+            location["antenna_status"] = int(data[11])
+            location["jamming_status"] = int(data[12])
+
+        self.module_state.location = location
 
 # Misc
 

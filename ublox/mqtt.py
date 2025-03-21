@@ -241,6 +241,13 @@ class MQTTClient:
             delete_on_success (bool, optional): Whether to delete the file on the module filesystem after publishing. Default is False.
         """
         out_filename = os.path.basename(in_file)
+        if not os.path.isfile(in_file):
+            raise FileNotFoundError(f"The file {in_file} does not exist")
+        
+        #TODO: this is an AWS limitation not module, it should be  moved upstream in the calling code. 
+        file_size = os.path.getsize(in_file)
+        if file_size > 128 * 1024:
+            raise ValueError(f"The file {in_file} exceeds the 128kB AWS size limit")
         try:
             self._module.upload_local_file_to_fs(in_file,out_filename,overwrite)
         except FileExistsError as e:

@@ -211,9 +211,9 @@ try:
     module.serial_init(clean=True)
     
     if lpm: 
-        module.setup(mno_profile, apn, power_saving_mode=True, tau=PSMPeriodicTau._4_hrs_30_mins, active_time=PSMActiveTime._14_secs)
+        module.setup_nvm(mno_profile, apn, power_saving_mode=True, tau=PSMPeriodicTau._4_hrs_30_mins, active_time=PSMActiveTime._14_secs)
     else:
-        module.setup(mno_profile, apn, power_saving_mode=False)
+        module.setup_nvm(mno_profile, apn, power_saving_mode=False)
 
     
     result = module.send_command(f'AT+CSQ',expected_reply=True)

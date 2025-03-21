@@ -103,13 +103,6 @@ class AT91PowerControl(PowerControl):
         self.gpio_reset_n = GPIO(85, GPIO.OUT,initial=False)
         self.gpio_pwr_on = GPIO(89, GPIO.OUT,initial=False)
 
-        #TODO: this is temporary for testing. Remove it.
-        self.model_name_override = None
-        model_name_override_path = "model_name_override"
-        if os.path.exists(model_name_override_path):
-            with open(model_name_override_path, 'r') as file:
-                self.model_name_override = file.read().strip()
-
     def get_power_state(self):
         """
         Retrieve the current power state.

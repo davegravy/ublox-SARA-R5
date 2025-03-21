@@ -461,10 +461,12 @@ class HTTPClient:
         HTTPClient.validate_server_path(server_path)
         SaraR5Module.validate_filename(response_filename)
 
+        self.completed = False
         self._module.send_command(f'AT+UHTTPC={self.profile_id},1,"{server_path}",'
                                     f'"{response_filename}"', expected_reply=False)
         self.server_path = server_path
         self._await_http_response(timeout = self.timeout)
+
         self._module.logger.info('HTTP GET request to "%s" for HTTP profile %s', self.url, self.profile_id)
 
 
@@ -488,6 +490,8 @@ class HTTPClient:
         HTTPClient.validate_server_path(server_path)
         SaraR5Module.validate_filename(response_filename)
         SaraR5Module.validate_filename(send_filename)
+
+        self.completed = False
 
         if self.security_profile is not None:
             for attr in ['hostname_sni', 'hostname_ca_validation']:
@@ -549,10 +553,10 @@ class HTTPClient:
         while True:
             time.sleep(0.25)
 
-            if self.completed == 0:
+            if not self.completed:
                 continue
 
-            if self.completed == 1:
+            if self.completed:
                 self._module.logger.debug('HTTP request completed')
                 break
 
