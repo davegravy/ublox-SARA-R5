@@ -324,6 +324,7 @@ class SaraR5ModuleState:
     model_name: str = None
     psd: dict = field(default_factory=dict)
     psm: 'SaraR5Module.PSMState' = None
+    timezone_minutes: int = 0
     signalling_cx_status: bool = False
     registration_status: 'SaraR5Module.EPSNetRegistrationStatus' = None
     radio_status: dict = field(default_factory=dict)
@@ -337,6 +338,7 @@ class SaraR5ModuleState:
         'model_name': 'Model Name',
         'psd': 'Packet Switched Data',
         'psm': 'Power Saving Mode',
+        'timezone_minutes': 'Timezone Offset (minutes)',
         'signalling_cx_status': 'Signalling Connection Status',
         'registration_status': 'Registration Status',
         'radio_status': 'Radio Status',
@@ -1148,6 +1150,24 @@ class SaraR5Module:
         radio_data = self.at_get_radio_statistics()
         self._parse_radio_stats(radio_data)
 
+    def get_rtc_offset(self):
+        """
+        Retrieves the RTC offset from the module.
+
+        Returns:
+            int: The RTC offset.
+        """
+
+        module_time = self.at_read_RTC()
+        system_time = datetime.datetime.now(datetime.timezone.utc)
+
+        module_time_utc = module_time.astimezone(datetime.timezone.utc)
+        
+        rtc_offset = (system_time - module_time_utc).total_seconds()
+        self.logger.info(f'RTC offset: {rtc_offset} seconds')
+        return rtc_offset
+        
+
     def _await_registration(self, polling_interval=2, timeout=180):
         """
         Continuously poll the carrier registration status and see if the connection status has changed.
@@ -1287,6 +1307,7 @@ class SaraR5Module:
         Returns:
             dict: The location data.
         """
+        self.logger.debug("Module: popping location data")
         location = self.module_state.location
         self.module_state.location = {}
         return location
@@ -1354,6 +1375,26 @@ class SaraR5Module:
         self.module_state.model_name = model_name
         return model_name
 
+    def at_read_RTC(self):
+        """
+        Reads the Real-Time Clock (RTC) of the module.
+
+        Returns:
+            datetime: The RTC as a datetime object.
+        """
+        result = self.send_command('AT+CCLK?', expected_reply=True)
+        result = ','.join(result)
+        rtc_str = result.strip('"')
+        # format is: yy/MM/dd,hh:mm:ss+TZ 
+        # for example: 14/07/01,15:00:00+01
+        # parse the date and time
+        rtc_datetime = datetime.datetime.strptime(rtc_str[:17], "%y/%m/%d,%H:%M:%S")
+        tz_offset = int(rtc_str[17:])
+        # tz_offset represents integer multiple of 15 minutes. E.g. 16 represents a 4hr offset
+        self.module_state.timezone_minutes = tz_offset * 15
+        rtc_datetime = rtc_datetime.replace(tzinfo=datetime.timezone(datetime.timedelta(minutes=self.module_state.timezone_minutes)))
+        self.logger.info(f'Real-Time Clock: {rtc_datetime}')
+        return rtc_datetime
 
 # Networking / radio config
 
@@ -2673,7 +2714,7 @@ class SaraR5Module:
         date = datetime.datetime.strptime(data[0], "%d/%m/%Y").date()
         time = datetime.datetime.strptime(data[1], "%H:%M:%S.%f").time()
         dt = datetime.datetime.combine(date, time).replace(tzinfo=datetime.timezone.utc)
-        
+
 
         location = {
             "datetime": dt.timestamp(),
