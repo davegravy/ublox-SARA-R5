@@ -25,7 +25,7 @@ from enum import Enum
 from dataclasses import dataclass, field
 from functools import partial
 from collections import namedtuple
-from typing import Callable
+from typing import Callable, Union
 from contextlib import nullcontext
 
 
@@ -169,6 +169,9 @@ class AT_Command_Handler():
         self.result, self.multiline_result = None, []
         self.debug_log = []
         self.timeout_time = time.time() + timeout
+        
+        if self.file_out:
+            os.makedirs(os.path.dirname(self.file_out), exist_ok=True)
         file_context = open(self.file_out, 'wb') if self.file_out else nullcontext() # Choose context manager conditionally
 
 
@@ -385,8 +388,8 @@ class SaraR5ModuleConfig:
     roaming: bool = False
     power_saving_mode: bool = False
     edrx_mode: EDRXMode = EDRXMode.DISABLED
-    tau: PSMPeriodicTau = None
-    active_time: PSMActiveTime = None
+    tau: Union[int,str] = None
+    active_time: Union[int,str] = None
     registration_status_reporting: 'SaraR5Module.EPSNetRegistrationReportConfig' = None
     
 
@@ -893,6 +896,8 @@ class SaraR5Module:
     def setup(self):
         self.at_read_imei()
         self.at_read_model_name()
+        self._await_iccid()
+        self.setup_gpio()
         if not self.is_config_synced():
             self.setup_nvm()
         else:
@@ -900,6 +905,12 @@ class SaraR5Module:
         
         self.wake_from_sleep()
         self.register_after_wake()
+
+    def setup_gpio(self):
+        #TODO: make dedicated GPIOC command
+        self.send_command("AT+UGPIOC=37,20", expected_reply=False) #ANT_ON supply switch
+        self.send_command("AT+UGPIOC=16,2", expected_reply=False) #network status LED
+
 
     def setup_nvm(self):
         """
@@ -934,8 +945,7 @@ class SaraR5Module:
         
         self.at_set_deep_sleep_mode_options(eDRX_mode=True, wake_up_suspended=True)
 
-        #TODO: get this bug fixed by ublox
-        self.send_command("AT+UHPPLMN=0", expected_reply=False) #disable manual PLMN selection as bug workaround 
+        self.send_command("AT+UHPPLMN=1", expected_reply=False) 
 
         if self.model == "R510S":
 
@@ -1190,12 +1200,9 @@ class SaraR5Module:
 
             self.at_get_eps_network_reg_status() #triggers URC
 
-            if (not self.module_config.roaming) and self.module_state.registration_status == \
-                SaraR5Module.EPSNetRegistrationStatus.REGISTERED_HOME_NET:
+            if self.module_state.registration_status == SaraR5Module.EPSNetRegistrationStatus.REGISTERED_HOME_NET:
                 break
-
-            if self.module_config.roaming and self.module_state.registration_status == \
-            SaraR5Module.EPSNetRegistrationStatus.REGISTERED_AND_ROAMING:
+            if self.module_config.roaming and self.module_state.registration_status == SaraR5Module.EPSNetRegistrationStatus.REGISTERED_AND_ROAMING:
                 break
 
             elapsed_time = time.time() - start_time
@@ -1204,7 +1211,7 @@ class SaraR5Module:
             
             time.sleep(polling_interval)
 
-    def _await_iccid(self, polling_interval=2, timeout=180):
+    def _await_iccid(self, polling_interval=2, timeout=10):
         """
         Continuously poll the ICCID and see if it has been retrieved.
 
@@ -1234,8 +1241,8 @@ class SaraR5Module:
             elapsed_time = time.time() - start_time
             if elapsed_time > timeout:
                 raise ConnectionTimeoutError(f'Could not retrieve ICCID in {timeout} seconds')
-            
-            time.sleep(polling_interval)
+            else:
+                time.sleep(polling_interval)
 
 
     def sync_location_with_file(self, file_path: str):
@@ -1252,7 +1259,7 @@ class SaraR5Module:
         """
         def is_valid(data):
             # Checks if data is a dict with a valid 'timestamp' (an integer)
-            return isinstance(data, dict) and 'datetime' in data and isinstance(data['datetime'], float)
+            return isinstance(data, dict) and 'application_datetime' in data and isinstance(data['application_datetime'], float)
         
         file_data = None
         
@@ -1277,7 +1284,7 @@ class SaraR5Module:
         # Case 1: Write to file and return file data if:
         #   - The file doesn't exist or its data is invalid, and the in-memory data is valid, OR
         #   - The in-memory data is valid and has a newer timestamp.
-        if memory_valid and (not file_valid or memory_data['datetime'] > file_data.get('datetime', 0)):
+        if memory_valid and (not file_valid or memory_data['application_datetime'] > file_data.get('application_datetime', 0)):
             try:
                 os.makedirs(os.path.dirname(file_path), exist_ok=True)
                 with open(file_path, 'w') as f:
@@ -1291,7 +1298,7 @@ class SaraR5Module:
         # Case 2: Return file data if
         #   - The file's data is valid and newer than in-memory data,
         #   - Or the in-memory data is missing or invalid.
-        if file_valid and (not memory_valid or file_data['datetime'] > memory_data.get('datetime', 0)):
+        if file_valid and (not memory_valid or file_data['application_datetime'] > memory_data.get('application_datetime', 0)):
             self.logger.debug(f"Selected file_data")
             return file_data
         
@@ -1802,15 +1809,15 @@ class SaraR5Module:
         return {"access_technology": access_technology, "requested_edrx_cycle": requested_edrx_cycle,
                 "requested_ptw": requested_ptw}
 
-    def at_set_psm_mode(self, mode:PSMMode, periodic_tau:PSMPeriodicTau=None,
-                         active_time:PSMActiveTime=None):
+    def at_set_psm_mode(self, mode:PSMMode, periodic_tau:Union[int, str]=None,
+                         active_time:Union[int, str]=None):
         """
         Sets the Power Saving Mode (PSM) for the module.
 
         Args:
             mode (PSMMode): The PSM mode to set.
-            periodic_tau (PSMPeriodicTau, optional): The periodic tau value for PSM.
-            active_time (PSMActiveTime, optional): The active time value for PSM.
+            periodic_tau (int, optional): The periodic tau value for PSM in seconds.
+            active_time (int, optional): The active time value for PSM in seconds.
         """
 
         if mode != SaraR5Module.PSMMode.DISABLED and not all([periodic_tau, active_time]):
@@ -1823,11 +1830,11 @@ class SaraR5Module:
         command = f'AT+CPSMS={mode.value}'
         logger_str = f'PSM Mode set to {mode.name}'
         if periodic_tau is not None:
-            command += f',,,"{periodic_tau.value}"'
-            logger_str += f' with Periodic Tau "{periodic_tau.name}"'
+            command += f',,,"{PSMPeriodicTau.encode(periodic_tau)}"'
+            logger_str += f' with Periodic Tau "{periodic_tau}"'
         if active_time is not None:
-            command += f',"{active_time.value}"'
-            logger_str += f' and Active Time {active_time.name}'
+            command += f',"{PSMActiveTime.encode(active_time)}"'
+            logger_str += f' and Active Time {active_time}'
         self.send_command(command, expected_reply=False, timeout=10)
         self.logger.info(logger_str)
 
@@ -1842,10 +1849,10 @@ class SaraR5Module:
         mode = SaraR5Module.PSMMode(int(result[0]))
         #periodic_rau is result[1]
         #gprs read timer is result[2]
-        periodic_tau = PSMPeriodicTau(result[3].strip('"'))
-        active_time = PSMActiveTime(result[4].strip('"'))
+        periodic_tau = PSMPeriodicTau.decode(result[3].strip('"'))
+        active_time = PSMActiveTime.decode(result[4].strip('"'))
         self.logger.info('PSM Mode: %s, Periodic Tau: %s, Active Time: %s',
-                        mode.name, periodic_tau.name, active_time.name)
+                        mode.name, periodic_tau, active_time)
         return {"mode": mode, "periodic_tau": periodic_tau, "active_time": active_time}
     
     def at_set_deep_sleep_mode_options(self, eDRX_mode:bool, wake_up_suspended:bool):
@@ -2407,6 +2414,13 @@ class SaraR5Module:
                     linefeed_buffered = False
                     self.serial_read_queue.put((data, timestamp))
                     continue
+                if urc == "+UULOCIND":
+                    self.serial_read_queue.put((linefeed, linefeed_timestamp))
+                    linefeed_buffered = False
+                    self.serial_read_queue.put((data, timestamp))
+                    continue
+
+
 
                 linefeed_timestamp_str = linefeed_timestamp.strftime("%Y-%m-%d_%H-%M-%S-%f")
                 timestamp_str = timestamp.strftime("%Y-%m-%d_%H-%M-%S-%f")
@@ -2673,9 +2687,29 @@ class SaraR5Module:
             if key == "cause_type":
                 parsed_result[key] = int(value)
             if key == "assigned_active_time":
-                parsed_result[key] = str(value)
+                # Only decode if value is not empty and looks like a binary string
+                if value and str(value).strip():
+                    try:
+                        # Strip quotes and whitespace from the value
+                        clean_value = str(value).strip().strip('"')
+                        parsed_result[key] = PSMActiveTime.decode(clean_value)
+                    except ValueError as e:
+                        self.logger.error(f"Failed to decode assigned_active_time '{value}': {e}")
+                        parsed_result[key] = None
+                else:
+                    parsed_result[key] = None
             if key == "assigned_tau":
-                parsed_result[key] = str(value)
+                # Only decode if value is not empty and looks like a binary string
+                if value and str(value).strip():
+                    try:
+                        # Strip quotes and whitespace from the value
+                        clean_value = str(value).strip().strip('"')
+                        parsed_result[key] = PSMPeriodicTau.decode(clean_value)
+                    except ValueError as e:
+                        self.logger.error(f"Failed to decode assigned_tau '{value}': {e}")
+                        parsed_result[key] = None
+                else:
+                    parsed_result[key] = None
             if key == "rac_or_mme":
                 parsed_result[key] = str(value)
 
@@ -2713,11 +2747,12 @@ class SaraR5Module:
         
         date = datetime.datetime.strptime(data[0], "%d/%m/%Y").date()
         time = datetime.datetime.strptime(data[1], "%H:%M:%S.%f").time()
-        dt = datetime.datetime.combine(date, time).replace(tzinfo=datetime.timezone.utc)
+        gnss_dt = datetime.datetime.combine(date, time).replace(tzinfo=datetime.timezone.utc)
 
 
         location = {
-            "datetime": dt.timestamp(),
+            "gnss_datetime": gnss_dt.timestamp(),
+            "application_datetime": datetime.datetime.now(datetime.timezone.utc).timestamp(),
             "latitude": float(data[2]),
             "longitude": float(data[3]),
             "altitude": float(data[4]),

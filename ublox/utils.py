@@ -1,255 +1,433 @@
 from enum import Enum
+from typing import Optional, Tuple, Dict, Union
 
-class PSMPeriodicTau(Enum):
-    _0_secs =    "00000000"
-    _2_secs =  "01100001"
-    _4_secs =  "01100010"
-    _6_secs =  "01100011"
-    _8_secs =  "01100100"
-    _10_secs =  "01100101"
-    _12_secs =  "01100110"
-    _14_secs =  "01100111"
-    _16_secs =  "01101000"
-    _18_secs =  "01101001"
-    _20_secs =  "01101010"
-    _22_secs =  "01101011"
-    _24_secs =  "01101100"
-    _26_secs =  "01101101"
-    _28_secs =  "01101110"
-    _30_secs =  "01101111"
-    _32_secs =  "01110000"
-    _34_secs =  "01110001"
-    _36_secs =  "01110010"
-    _38_secs =  "01110011"
-    _40_secs =  "01110100"
-    _42_secs =  "01110101"
-    _44_secs =  "01110110"
-    _46_secs =  "01110111"
-    _48_secs =  "01111000"
-    _50_secs =  "01111001"
-    _52_secs =  "01111010"
-    _54_secs =  "01111011"
-    _56_secs =  "01111100"
-    _58_secs =  "01111101"
-    _1_min =  "01111110"
-    _1_min_2_secs =  "01111111"
-    _1_min_30_secs =  "10000011"
-    _2_mins =  "10000100"
-    _2_mins_30_secs =  "10000101"
-    _3_mins =  "10000110"
-    _3_mins_30_secs =  "10000111"
-    _4_mins =  "10001000"
-    _4_mins_30_secs =  "10001001"
-    _5_mins =  "10001010"
-    _5_mins_30_secs =  "10001011"
-    _6_mins =  "10001100"
-    _6_mins_30_secs =  "10001101"
-    _7_mins =  "10001110"
-    _7_mins_30_secs =  "10001111"
-    _8_mins =  "10010000"
-    _8_mins_30_secs =  "10010001"
-    _9_mins =  "10010010"
-    _9_mins_30_secs =  "10010011"
-    _10_mins =  "00000001"
-    _10_mins_30_secs =  "10010101"
-    _11_mins =  "10010110"
-    _11_mins_30_secs =  "10010111"
-    _12_mins =  "10011000"
-    _12_mins_30_secs =  "10011001"
-    _13_mins =  "10011010"
-    _13_mins_30_secs =  "10011011"
-    _14_mins =  "10011100"
-    _14_mins_30_secs =  "10011101"
-    _15_mins =  "10011110"
-    _15_mins_30_secs =  "10011111"
-    _16_mins =  "10110000"
-    _17_mins =  "10110001"
-    _18_mins =  "10110010"
-    _19_mins =  "10110011"
-    _20_mins =  "00000010"
-    _21_mins =  "10110101"
-    _22_mins =  "10110110"
-    _23_mins =  "10110111"
-    _24_mins =  "10111000"
-    _25_mins =  "10111001"
-    _26_mins =  "10111010"
-    _27_mins =  "10111011"
-    _28_mins =  "10111100"
-    _29_mins =  "10111101"
-    _30_mins =  "00000011"
-    _31_mins =  "10111111"
-    _40_mins =  "00000100"
-    _50_mins =  "00000101"
-    _1_hr =  "00000110"
-    _1_hr_10_mins =  "00000111"
-    _1_hr_20_mins =  "00001000"
-    _1_hr_30_mins =  "00001001"
-    _1_hr_40_mins =  "00001010"
-    _1_hr_50_mins =  "00001011"
-    _2_hrs =  "00001100"
-    _2_hrs_10_mins =  "00001101"
-    _2_hrs_20_mins =  "00001110"
-    _2_hrs_30_mins =  "00001111"
-    _2_hrs_40_mins =  "00010000"
-    _2_hrs_50_mins =  "00010001"
-    _3_hrs =  "00010010"
-    _3_hrs_10_mins =  "00010011"
-    _3_hrs_20_mins =  "00010100"
-    _3_hrs_30_mins =  "00010101"
-    _3_hrs_40_mins =  "00010110"
-    _3_hrs_50_mins =  "00010111"
-    _4_hrs =  "00011000"
-    _4_hrs_10_mins =  "00011001"
-    _4_hrs_20_mins =  "00011010"
-    _4_hrs_30_mins =  "00011011"
-    _4_hrs_40_mins =  "00011100"
-    _4_hrs_50_mins =  "00011101"
-    _5_hrs =  "00011110"
-    _5_hrs_10_mins =  "00011111"
-    _6_hrs =  "00100110"
-    _7_hrs =  "00100111"
-    _8_hrs =  "00101000"
-    _9_hrs =  "00101001"
-    _10_hrs =  "00101010"
-    _11_hrs =  "00101011"
-    _12_hrs =  "00101100"
-    _13_hrs =  "00101101"
-    _14_hrs =  "00101110"
-    _15_hrs =  "00101111"
-    _16_hrs =  "00110000"
-    _17_hrs =  "00110001"
-    _18_hrs =  "00110010"
-    _19_hrs =  "00110011"
-    _20_hrs =  "00110100"
-    _21_hrs =  "00110101"
-    _22_hrs =  "00110110"
-    _23_hrs =  "00110111"
-    _1_day =  "00111000"
-    _1_day_1_hr =  "00111001"
-    _1_day_2_hrs =  "00111010"
-    _1_day_3_hrs =  "00111011"
-    _1_day_4_hrs =  "00111100"
-    _1_day_5_hrs =  "00111101"
-    _1_day_6_hrs =  "00111110"
-    _1_day_7_hrs =  "00111111"
-    _1_day_16_hrs =  "01000100"
-    _2_days_2_hrs =  "01000101"
-    _2_days_12_hrs =  "01000110"
-    _2_days_22_hrs =  "01000111"
-    _3_days_8_hrs =  "01001000"
-    _3_days_18_hrs =  "01001001"
-    _4_days_4_hrs =  "01001010"
-    _4_days_14_hrs =  "01001011"
-    _5_days =  "01001100"
-    _5_days_10_hrs =  "01001101"
-    _5_days_20_hrs =  "01001110"
-    _6_days_6_hrs =  "01001111"
-    _6_days_16_hrs =  "01010000"
-    _7_days_2_hrs =  "01010001"
-    _7_days_12_hrs =  "01010010"
-    _7_days_22_hrs =  "01010011"
-    _8_days_8_hrs =  "01010100"
-    _8_days_18_hrs =  "01010101"
-    _9_days_4_hrs =  "01010110"
-    _9_days_14_hrs =  "01010111"
-    _10_days =  "01011000"
-    _10_days_10_hrs =  "01011001"
-    _10_days_20_hrs =  "01011010"
-    _11_days_6_hrs =  "01011011"
-    _11_days_16_hrs =  "01011100"
-    _12_days_2_hrs =  "01011101"
-    _12_days_12_hrs =  "01011110"
-    _12_days_22_hrs =  "01011111"
+class PSMPeriodicTau:
+    """
+    Encode/decode for the 8-bit Periodic TAU / GPRS Timer 3 coding (used by AT+CPSMS / +CEREG).
+    Bits 8..6 = unit code (3 bits)
+    Bits 5..1 = value (5 bits)
 
-class PSMActiveTime(Enum):
-    _0_secs =  "00000000"
-    _2_secs =  "00000001"
-    _4_secs =  "00000010"
-    _6_secs =  "00000011"
-    _8_secs =  "00000100"
-    _10_secs =  "00000101"
-    _12_secs =  "00000110"
-    _14_secs =  "00000111"
-    _16_secs =  "00001000"
-    _18_secs =  "00001001"
-    _20_secs =  "00001010"
-    _22_secs =  "00001011"
-    _24_secs =  "00001100"
-    _26_secs =  "00001101"
-    _28_secs =  "00001110"
-    _30_secs =  "00001111"
-    _32_secs =  "00010000"
-    _34_secs =  "00010001"
-    _36_secs =  "00010010"
-    _38_secs =  "00010011"
-    _40_secs =  "00010100"
-    _42_secs =  "00010101"
-    _44_secs =  "00010110"
-    _46_secs =  "00010111"
-    _48_secs =  "00011000"
-    _50_secs =  "00011001"
-    _52_secs =  "00011010"
-    _54_secs =  "00011011"
-    _56_secs =  "00011100" # TODO: wrong
-    _58_secs =  "00011101"
-    _1_min =  "00011110"
-    _1_min_2_secs =  "00011111"
-    _2_mins =  "00100010"
-    _3_mins =  "00100011"
-    _4_mins =  "00100100"
-    _5_mins =  "00100101"
-    _6_mins =  "00100110"
-    _7_mins =  "00100111"
-    _8_mins =  "00101000"
-    _9_mins =  "00101001"
-    _10_mins =  "00101010"
-    _11_mins =  "00101011"
-    _12_mins =  "00101100"
-    _13_mins =  "00101101"
-    _14_mins =  "00101110"
-    _15_mins =  "00101111"
-    _16_mins =  "00110000"
-    _17_mins =  "00110001"
-    _18_mins =  "00110010"
-    _19_mins =  "00110011"
-    _20_mins =  "00110100"
-    _21_mins =  "00110101"
-    _22_mins =  "00110110"
-    _23_mins =  "00110111"
-    _24_mins =  "00111000"
-    _25_mins =  "00111001"
-    _26_mins =  "00111010"
-    _27_mins =  "00111011"
-    _28_mins =  "00111100"
-    _29_mins =  "00111101"
-    _30_mins =  "00111110"
-    _31_mins =  "00111111"
-    _36_mins =  "01000110"
-    _42_mins =  "01000111"
-    _48_mins =  "01001000"
-    _54_mins =  "01001001"
-    _1_hr =  "01001010"
-    _1_hr_6_mins =  "01001011"
-    _1_hr_12_mins =  "01001100"
-    _1_hr_18_mins =  "01001101"
-    _1_hr_24_mins =  "01001110"
-    _1_hr_30_mins =  "01001111"
-    _1_hr_36_mins =  "01010000"
-    _1_hr_42_mins =  "01010001"
-    _1_hr_48_mins =  "01010010"
-    _1_hr_54_mins =  "01010011"
-    _2_hrs =  "01010100"
-    _2_hrs_6_mins =  "01010101"
-    _2_hrs_12_mins =  "01010110"
-    _2_hrs_18_mins =  "01010111"
-    _2_hrs_24_mins =  "01011000"
-    _2_hrs_30_mins =  "01011001"
-    _2_hrs_36_mins =  "01011010"
-    _2_hrs_42_mins =  "01011011"
-    _2_hrs_48_mins =  "01011100"
-    _2_hrs_54_mins =  "01011101"
-    _3_hrs =  "01011110"
-    _3_hrs_6_mins =  "01011111"
+    Unit mapping (for Timer3 / T3412):
+        0b000 -> multiples of 10 minutes
+        0b001 -> multiples of 1 hour
+        0b010 -> multiples of 10 hours
+        0b011 -> multiples of 2 seconds
+        0b100 -> multiples of 30 seconds
+        0b101 -> multiples of 1 minute
+        0b110 -> multiples of 320 hours
+        0b111 -> timer deactivated (bits 5..1 ignored)
+    """
+
+    # unit_code -> multiplier in seconds
+    _UNIT_MULTIPLIER = {
+        0b000: 10 * 60,         # 10 minutes
+        0b001: 60 * 60,         # 1 hour
+        0b010: 10 * 3600,       # 10 hours
+        0b011: 2,               # 2 seconds
+        0b100: 30,              # 30 seconds
+        0b101: 60,              # 1 minute
+        0b110: 320 * 3600,      # 320 hours
+        # 0b111 -> deactivated (special)
+    }
+
+    DEACTIVATED_STANDARD = "11111111"
+    ZERO = "00000000"
+    DISABLED = "DISABLED"
+
+    # A convenience mapping label -> 8-bit string (populated below)
+    CONVENIENCE: Dict[str, str] = {}
+
+    @classmethod
+    def encode(cls, seconds: Union[int, str]) -> str:
+        """
+        Encode a seconds value into an 8-character '0'/'1' bitstring.
+        - If seconds is cls.DISABLED -> deactivated -> returns '11111111' (canonical).
+        - If seconds == 0 -> returns '00000000'.
+        - For other values: finds unit/value pair such that value * multiplier == seconds
+          and 0 <= value <= 31. If no exact match, raises ValueError.
+        """
+        if seconds is cls.DISABLED:
+            return cls.DEACTIVATED_STANDARD
+        if seconds == 0:
+            return cls.ZERO
+
+        for unit_code, mult in cls._UNIT_MULTIPLIER.items():
+            if seconds % mult != 0:
+                continue
+            value = seconds // mult
+            if 0 <= value <= 31:
+                return format(unit_code, "03b") + format(int(value), "05b")
+
+        raise ValueError(f"No exact encoding available for {seconds} seconds")
+
+    @classmethod
+    def decode(cls, bitstr: str) -> Union[int, str]:
+        """
+        Decode an 8-bit bitstring into seconds.
+        - If top 3 bits == '111' => deactivated -> return cls.DISABLED (bits 5..1 ignored).
+        - If bitstr == '00000000' -> returns 0.
+        - Otherwise returns multiplier * value (int seconds).
+        Raises ValueError for invalid bitstr format or unknown unit.
+        """
+        if not isinstance(bitstr, str) or len(bitstr) != 8 or any(c not in "01" for c in bitstr):
+            raise ValueError("bitstr must be an 8-character string of '0'/'1'")
+
+        top3 = bitstr[0:3]
+        if top3 == "111":
+            # Per spec: bits 5..1 ignored when unit == 111 => deactivated
+            return cls.DISABLED
+
+        if bitstr == cls.ZERO:
+            return 0
+
+        unit_code = int(top3, 2)
+        value = int(bitstr[3:], 2)
+        mult = cls._UNIT_MULTIPLIER.get(unit_code)
+        if mult is None:
+            raise ValueError(f"Unknown unit code: {unit_code:03b}")
+
+        return mult * value
+
+    @classmethod
+    def closest(cls, seconds: int) -> Tuple[str, int]:
+        """
+        Find the representable encoding whose decoded seconds is <= requested seconds
+        and whose delta (requested - encoded) is minimal (i.e. best fit not exceeding target).
+        Returns (bitstr, encoded_seconds).
+        If seconds <= 0 returns ('00000000', 0).
+        """
+        if seconds <= 0:
+            return cls.ZERO, 0
+
+        best_bitstr = None
+        best_encoded = None
+        best_delta = None
+
+        # iterate all unit/value combos
+        for unit_code, mult in cls._UNIT_MULTIPLIER.items():
+            for v in range(0, 32):  # 0..31
+                encoded = mult * v
+                if encoded == 0:
+                    # that's the ZERO representation; handled above
+                    continue
+                if encoded <= seconds:
+                    delta = seconds - encoded
+                    if best_delta is None or delta < best_delta:
+                        best_delta = delta
+                        best_encoded = encoded
+                        best_bitstr = format(unit_code, "03b") + format(v, "05b")
+                        if delta == 0:
+                            return best_bitstr, best_encoded
+
+        if best_bitstr is None:
+            # no representable value <= seconds (very small seconds that don't fit)
+            raise ValueError("No representable timer value <= requested seconds")
+
+        return best_bitstr, best_encoded
+
+    @classmethod
+    def human_label_for_seconds(cls, seconds: int) -> str:
+        """Generate a human-friendly label like _1_hr_30_mins or _45_secs."""
+        if seconds == 0:
+            return "_0_secs"
+        parts = []
+        rem = seconds
+        days = rem // 86400
+        if days:
+            parts.append(f"{days}_day" + ("s" if days != 1 else ""))
+            rem %= 86400
+        hrs = rem // 3600
+        if hrs:
+            parts.append(f"{hrs}_hr" + ("s" if hrs != 1 else ""))
+            rem %= 3600
+        mins = rem // 60
+        if mins:
+            parts.append(f"{mins}_min" + ("s" if mins != 1 else ""))
+            rem %= 60
+        if rem:
+            parts.append(f"{rem}_secs")
+        return "_" + "_".join(parts)
+
+# Populate CONVENIENCE mapping programmatically (all representable values)
+def _populate_convenience():
+    names = {}
+    seen_labels = set()
+    # include ZERO
+    names["_0_secs"] = PSMPeriodicTau.ZERO
+
+    for unit_code, mult in PSMPeriodicTau._UNIT_MULTIPLIER.items():
+        for v in range(0, 32):
+            bitstr = format(unit_code, "03b") + format(v, "05b")
+            secs = mult * v
+            # Skip the ZERO duplicate (already added)
+            if secs == 0:
+                continue
+            label = PSMPeriodicTau.human_label_for_seconds(secs)
+
+            # avoid collisions: prefer more specific label when collisions occur
+            if label in seen_labels:
+                # build a more specific label (days_hrs_mins_secs)
+                parts = []
+                rem = secs
+                d = rem // 86400
+                if d:
+                    parts.append(f"{d}_day" + ("s" if d != 1 else ""))
+                rem %= 86400
+                h = rem // 3600
+                if h:
+                    parts.append(f"{h}_hr" + ("s" if h != 1 else ""))
+                rem %= 3600
+                m = rem // 60
+                if m:
+                    parts.append(f"{m}_min" + ("s" if m != 1 else ""))
+                rem %= 60
+                if rem:
+                    parts.append(f"{rem}_secs")
+                label = "_" + "_".join(parts) if parts else f"_{secs}_secs"
+
+            names[label] = bitstr
+            seen_labels.add(label)
+
+    # add deactivated canonical label
+    names["_deactivated"] = PSMPeriodicTau.DEACTIVATED_STANDARD
+
+    # sort keys for stable ordering and put into CONVENIENCE
+    sorted_items = dict(sorted(names.items(), key=lambda kv: kv[0]))
+    PSMPeriodicTau.CONVENIENCE.update(sorted_items)
+
+class PSMActiveTime:
+    """
+    Encoder/decoder for T3324 (Active Time) which uses the GPRS Timer 2 IE coding
+    from 3GPP TS 24.008 (one octet: bits 8..6 = unit, bits 5..1 = 5-bit value).
+    decode() returns:
+      - None when top3 bits == '111' (timer deactivated; bits 5..1 ignored)
+      - 0 for '00000000'
+      - integer number of seconds otherwise
+
+    Known unit mapping for GPRS Timer 2 (as used by T3324):
+      0b000 -> multiples of 2 seconds
+      0b001 -> multiples of 1 minute (60 seconds)
+      0b010 -> multiples of 1 decihour (1/10 hour = 6 minutes = 360 seconds)
+      0b111 -> deactivated (bits 5..1 ignored)
+
+    Many vendor docs note: "Other values shall be interpreted as multiples of 1 minute"
+    for older/this protocol version. This implementation decodes unknown non-111 units
+    as 1 minute multiples to be robust.
+    """
+
+    # Known unit multipliers (seconds)
+    _UNIT_MULTIPLIER = {
+        0b000: 2,      # 2 seconds
+        0b001: 60,     # 1 minute
+        0b010: 360,    # 1 decihour (6 minutes)
+        # other unit codes exist in other timer types; treat others as 60s fallback on decode
+    }
+
+    DEACTIVATED_CANONICAL = "11111111"
+    ZERO = "00000000"
+    DISABLED = "DISABLED"
+
+    CONVENIENCE: Dict[str, str] = {}
+
+    @classmethod
+    def encode(cls, seconds: Union[int, str]) -> str:
+        """
+        Encode seconds -> 8-bit string.
+        - seconds is cls.DISABLED -> return canonical deactivated "11111111"
+        - seconds == 0 -> "00000000"
+        - otherwise search for a (unit_code, value) such that multiplier * value == seconds
+          and 0 <= value <= 31. Choose the smallest multiplier that fits (prefer smaller units).
+        Raises ValueError if no exact representation exists.
+        """
+        if seconds is cls.DISABLED:
+            return cls.DEACTIVATED_CANONICAL
+        if seconds == 0:
+            return cls.ZERO
+
+        # Prefer smaller units first (so 2s multiples are chosen when possible)
+        # Order: 2s, 60s, 360s
+        for unit_code in (0b000, 0b001, 0b010):
+            mult = cls._UNIT_MULTIPLIER[unit_code]
+            if seconds % mult != 0:
+                continue
+            value = seconds // mult
+            if 0 <= value <= 31:
+                return format(unit_code, "03b") + format(int(value), "05b")
+
+        # If not exact, we don't guess; raise so caller can use closest()
+        raise ValueError(f"No exact GPRS-Timer2 encoding for {seconds} seconds")
+
+    @classmethod
+    def decode(cls, bitstr: str) -> Union[int, str]:
+        """
+        Decode an 8-character '0'/'1' string into seconds.
+        - If top3 bits == '111' -> cls.DISABLED (deactivated)
+        - If bitstr == '00000000' -> 0
+        - If unit_code known -> multiplier * value
+        - If unit_code unknown (but not 111) -> treat as 1 minute multiples (compat behaviour)
+        Raises ValueError on malformed input.
+        """
+        if not isinstance(bitstr, str) or len(bitstr) != 8 or any(c not in "01" for c in bitstr):
+            raise ValueError("bitstr must be an 8-character string of '0'/'1'")
+
+        top3 = bitstr[:3]
+        if top3 == "111":
+            return cls.DISABLED
+        if bitstr == cls.ZERO:
+            return 0
+
+        unit_code = int(top3, 2)
+        value = int(bitstr[3:], 2)
+
+        if unit_code in cls._UNIT_MULTIPLIER:
+            mult = cls._UNIT_MULTIPLIER[unit_code]
+            return mult * value
+
+        # Fallback: treat unknown unit codes (non-111) as multiples of 1 minute (60s)
+        # (many vendor docs say "other values shall be interpreted as multiples of 1 minute")
+        return 60 * value
+
+    @classmethod
+    def closest(cls, seconds: int) -> Tuple[str, int]:
+        """
+        Return the representable bitstr whose decoded value is <= seconds and
+        has the smallest delta (best fit not exceeding target).
+        Returns (bitstr, encoded_seconds).
+        If seconds <= 0 returns ZERO.
+        """
+        if seconds <= 0:
+            return cls.ZERO, 0
+
+        best = None
+        best_delta = None
+        best_encoded = None
+
+        # enumerate plausible unit / value pairs (unit in known + also consider minute-fallback unit codes)
+        # We'll iterate real unit codes we support (000,001,010) and also include 1-minute multiples (unit_code None)
+        # to ensure we don't miss reasonable fits.
+        # For completeness iterate values 0..31 for each representative unit code.
+        candidate_units = list(cls._UNIT_MULTIPLIER.items())  # (unit_code, mult)
+        # add a pseudo-unit for minute-fallback (use None to indicate 60s multiplier)
+        candidate_units.append((None, 60))
+
+        for unit_code, mult in candidate_units:
+            for v in range(0, 32):
+                if mult * v == 0:
+                    continue
+                encoded_sec = mult * v
+                if encoded_sec <= seconds:
+                    delta = seconds - encoded_sec
+                    if best is None or delta < best_delta:
+                        best_delta = delta
+                        best_encoded = encoded_sec
+                        if unit_code is None:
+                            # create bitstr using 001 (1 minute) as canonical for minute-based fallback
+                            bitstr = format(0b001, "03b") + format(v, "05b")
+                        else:
+                            bitstr = format(unit_code, "03b") + format(v, "05b")
+                        best = bitstr
+                        if delta == 0:
+                            return best, best_encoded
+
+        if best is None:
+            raise ValueError("No representable timer value <= requested seconds")
+
+        return best, best_encoded
+
+    @classmethod
+    def human_label_for_seconds(cls, seconds: int) -> str:
+        """Human friendly label generation (e.g. _1_min_30_secs)"""
+        if seconds == 0:
+            return "_0_secs"
+        parts = []
+        rem = seconds
+        days = rem // 86400
+        if days:
+            parts.append(f"{days}_day" + ("s" if days != 1 else ""))
+            rem %= 86400
+        hrs = rem // 3600
+        if hrs:
+            parts.append(f"{hrs}_hr" + ("s" if hrs != 1 else ""))
+            rem %= 3600
+        mins = rem // 60
+        if mins:
+            parts.append(f"{mins}_min" + ("s" if mins != 1 else ""))
+            rem %= 60
+        if rem:
+            parts.append(f"{rem}_secs")
+        return "_" + "_".join(parts)
+
+# Populate CONVENIENCE map programmatically
+def _populate_convenience():
+    names = {}
+    names["_0_secs"] = PSMActiveTime.ZERO
+
+    # known units: 000 (2s), 001 (60s), 010 (360s)
+    for unit_code, mult in PSMActiveTime._UNIT_MULTIPLIER.items():
+        for v in range(0, 32):
+            bitstr = format(unit_code, "03b") + format(v, "05b")
+            secs = mult * v
+            if secs == 0:
+                continue
+            label = PSMActiveTime.human_label_for_seconds(secs)
+            # avoid collisions by making label more specific if needed
+            if label in names:
+                # build a descriptive label with composite parts
+                rem = secs
+                parts = []
+                d = rem // 86400
+                if d:
+                    parts.append(f"{d}_day" + ("s" if d != 1 else ""))
+                    rem %= 86400
+                h = rem // 3600
+                if h:
+                    parts.append(f"{h}_hr" + ("s" if h != 1 else ""))
+                    rem %= 3600
+                m = rem // 60
+                if m:
+                    parts.append(f"{m}_min" + ("s" if m != 1 else ""))
+                    rem %= 60
+                if rem:
+                    parts.append(f"{rem}_secs")
+                label = "_" + "_".join(parts) if parts else f"_{secs}_secs"
+
+            names[label] = bitstr
+
+    names["_deactivated"] = PSMActiveTime.DEACTIVATED_CANONICAL
+
+    # stable ordering
+    PSMActiveTime.CONVENIENCE.update(dict(sorted(names.items(), key=lambda kv: kv[0])))
+
+_populate_convenience()
+
+# Quick demonstration when run as script
+if __name__ == "__main__":
+    samples = [
+        (PSMActiveTime.DISABLED, "deactivated"),
+        (0, "zero"),
+        (2, "2s"),
+        (4, "4s"),
+        (60, "1m"),
+        (240, "4m"),
+        (360, "6m (1 decihour)"),
+        (123, "nonexact"),
+    ]
+    for secs, name in samples:
+        try:
+            b = PSMActiveTime.encode(secs)
+            dec = PSMActiveTime.decode(b)
+            print(f"{name}: encode({secs}) -> {b} -> decode -> {dec}")
+        except Exception as e:
+            print(f"{name}: encode({secs}) -> ERROR: {e}")
+
+    # decode deactivated examples (any '111xxxxx' -> None)
+    for low in ("00000", "01010", "11111"):
+        s = "111" + low
+        print(f"decode {s} -> {PSMActiveTime.decode(s)}")
+
+    # show some convenience entries
+    for k, v in list(PSMActiveTime.CONVENIENCE.items())[:12]:
+        print(k, v)
 
 class EDRXMode(Enum):
     """
