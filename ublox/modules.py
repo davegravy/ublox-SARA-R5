@@ -1244,6 +1244,68 @@ class SaraR5Module:
             else:
                 time.sleep(polling_interval)
 
+    def get_spotnow_localization_with_retries(self, max_retries=3, accuracy_meters=30, timeout=10, polling_interval=1):
+        """
+        Request SpotNow localization data and wait for location update with retries.
+        
+        This method calls at_get_spotnow_localization_data() and waits for 
+        self.module_state.location to be updated by handle_uuloc(). If the resulting 
+        accuracy (uncertainty) is above the specified threshold, it will retry up to 
+        max_retries times.
+        
+        Args:
+            max_retries (int, optional): Maximum number of attempts to get location 
+                with required accuracy. Defaults to 3.
+            accuracy_meters (int, optional): Required accuracy threshold in meters.
+                The location uncertainty must be at or below this value. Defaults to 30.
+            timeout (int, optional): Timeout for each localization request in seconds.
+                Defaults to 10.
+            polling_interval (float, optional): Interval between checks for location 
+                update in seconds. Defaults to 1.
+        
+        Returns:
+            dict: The location data dictionary containing latitude, longitude, altitude,
+                uncertainty, and other fields.
+        
+        Raises:
+            ATTimeoutError: If unable to get location with required accuracy within
+                the specified number of retries.
+        """
+        self.logger.info(f'Getting SpotNow localization with accuracy {accuracy_meters}m (max {max_retries} attempts)')
+        
+        for attempt in range(1, max_retries + 1):
+            self.logger.info(f'SpotNow localization attempt {attempt}/{max_retries}')
+            
+            # Clear previous location data
+            self.module_state.location = {}
+            
+            # Request new localization data
+            self.at_get_spotnow_localization_data(timeout=timeout, accuracy=accuracy_meters)
+            
+            # Wait for handle_uuloc to update module_state.location
+            start_time = time.time()
+            max_wait = timeout + 10  # Allow extra time beyond the AT command timeout
+            
+            while True:
+                if self.module_state.location:
+                    # Location has been updated
+                    uncertainty = self.module_state.location.get('uncertainty')
+                    if uncertainty is not None and uncertainty <= accuracy_meters:
+                        self.logger.info(f'SpotNow localization successful: uncertainty={uncertainty}m (required <={accuracy_meters}m)')
+                        return self.module_state.location
+                    elif uncertainty is not None:
+                        self.logger.warning(f'SpotNow localization uncertainty {uncertainty}m exceeds required {accuracy_meters}m')
+                        break  # Try again
+                
+                elapsed = time.time() - start_time
+                if elapsed > max_wait:
+                    self.logger.warning(f'Timeout waiting for SpotNow location update on attempt {attempt}')
+                    break
+                
+                time.sleep(polling_interval)
+        
+        # All retries exhausted
+        raise ATTimeoutError(f'Could not get SpotNow location with accuracy <={accuracy_meters}m after {max_retries} attempts')
 
     def sync_location_with_file(self, file_path: str):
         """
